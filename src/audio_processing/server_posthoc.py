@@ -8,6 +8,8 @@ if _rs_c not in _rs_sys.path:
 import reactor_safety  # reactor/thread boundary; src/common bootstrapped above
 from ws_protocol import WsMessageMixin  # shared onMessage/onClose
 from recording_filename import parse_recording_filename  # key/offset from filename
+import recording_fragments  # ordered/joined reconnect fragments (audit E.2)
+from gpu_lease import acquire_for_run, live_pods_present, PreemptionWatcher, GPU_BUSY_REPLY
 import os
 import time
 import logging
@@ -107,11 +109,23 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
         # a client disconnect or heartbeat timeout) leaves the processors running
         # so the run finishes in the background and marks itself complete.
         self._run_active = False
+        # GPU admission for the full run (common/gpu_lease): the slot lease
+        # and the live-class watcher that pre-empts the run.
+        self._gpu_lease = None
+        self._preempt_watch = None
 
         cm.add(self)
         logging.info('New client connected...')
 
     # onMessage / onClose come from WsMessageMixin (shared across both services).
+
+    def _release_gpu(self):
+        watch, self._preempt_watch = self._preempt_watch, None
+        if watch is not None:
+            watch.stop()
+        lease, self._gpu_lease = self._gpu_lease, None
+        if lease is not None:
+            lease.release()
 
     def _authorised(self, data):
         if ticket_allows(redis_client._redis(), data.get('ticket'), data.get('sessiondeviceid')):
@@ -228,13 +242,19 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
                                 continue
                             self.speakers[speaker["id"]] = {"alias": speaker["alias"], "data": byte_audio_data}
 
-                        self.signal_start()
+                        if not self.signal_start():
+                            # GPU busy (live class / another run): defer and
+                            # do nothing else; the queue re-enqueues on the code.
+                            running_audio_processes.pop(key, None)
+                            self.send_json(dict(GPU_BUSY_REPLY))
+                            return
                         self.processor.setSpeakerFingerprints(self.speakers)
 
                         self.send_json({'type':'init posthoc analytics completed','message':"Starting Audio Analytics Processing"})
                         logging.info('Audio Posthoc analytics initiated')
                 except Exception:
                     running_audio_processes.pop(key, None)
+                    self._release_gpu()
                     logging.exception('posthoc init failed after claiming %s; claim released', key)
                     self.send_json({'type': 'error', 'message': 'Post-hoc initialization failed; see the audio service log.'})
 
@@ -346,7 +366,17 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
             with _running_guard:
                 hits = [k for k in list(running_audio_processes.keys()) if k.startswith(sdid + '-')]
             for k in hits:
-                proc = running_audio_processes.pop(k, None)
+                proc = running_audio_processes.get(k)
+                if hasattr(proc, 'cancel'):
+                    # Full run: kills the ASR worker's process group; the
+                    # claim and GPU lease are released by the run itself once
+                    # the child has exited (audit C.5). Nothing gets posted.
+                    try:
+                        proc.cancel()
+                    except Exception:
+                        logging.exception('cancel failed for %s', k)
+                    continue
+                proc = running_audio_processes.pop(k, None)  # P&I / E&T: flag only
                 if hasattr(proc, 'stop'):
                     try:
                         proc.stop()
@@ -393,14 +423,23 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
             logging.warning("get_audio_file_path: non-integer device id %r", sessionDeviceId)
             return None
         files = list(target_dir.glob("{0}-*".format(prefix)))
-
-        if files:
-            file_path = files[0]
-            logging.info("Found: {0}".format(file_path))
-            return file_path
-        else:
+        # A reconnect starts a new fragment; files[0] of this glob was an
+        # arbitrary one. Take the _orig fragments in start-time order and,
+        # when there are several, analyse their ffmpeg join (cached next to
+        # them, rebuilt only when a fragment is newer) (audit E.2).
+        chosen, to_join = recording_fragments.select_recording(files)
+        if chosen is None:
             logging.info("No file found")
             return None
+        if to_join:
+            logging.info("Joining %d recording fragments for %s -> %s", len(to_join), prefix, chosen)
+            try:
+                recording_fragments.join_fragments(to_join, chosen)
+            except Exception as e:
+                logging.warning("fragment join failed for %s (%s); using the first fragment", prefix, e)
+                chosen = to_join[0]
+        logging.info("Found: {0}".format(chosen))
+        return Path(chosen)
 
     def read_bytes_from_wav(self,wav):
         return audio_bytes.read_bytes_from_wav(wav)
@@ -414,6 +453,13 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
         self.send_json({'type': 'end', 'message': message})
 
     def signal_start(self):
+        # GPU admission first, before any model load (audit C.1): False when
+        # a class is streaming or another run holds the slot. The caller
+        # replies gpu_busy and releases the pod claim.
+        self._gpu_lease = acquire_for_run(
+            redis_client._redis(), owner='audio-posthoc:%d:%s' % (os.getpid(), self.config.auth_key))
+        if self._gpu_lease is None:
+            return False
         # WhisperX transcribes the whole file before emitting results, so the
         # buffer must retain the entire recording (2h cap ≈ 230MB PCM).
         buffer_seconds = 7200 if getattr(self, 'asr_choice', None) in ('whisperx', 'qwen3', 'qwen3-0.6b', 'crisperwhisper', 'whisper') else None
@@ -457,16 +503,31 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
             self.asr = GoogleASR(self.asr_audio_queue, self.asr_transcript_queue, self.config, self.stream_data,self.interval,STOP_SIGNAL)
         self.asr.start()
         self.processor = AudioProcessorPosthoc(self.audio_buffer, self.asr_transcript_queue, diarization_model, get_semantic_model(getattr(self, 'embedder_choice', None)), self.config, scorer=getattr(self, 'scorer_choice', None))
-        # Full re-run REPLACES the pod's previous transcript-level results.
-        callbacks.post_posthoc_reset(self.config.auth_key, 'audio')
-        self.processor.start()
-        self._run_active = True  # run may now finish in the background if the client leaves
+        # Mark the run as running server-side WITHOUT wiping: the previous
+        # results stay until the processor has the complete new set and
+        # publishes it (reset-with-wipe happens there) (audit C.3).
+        callbacks.post_posthoc_reset(self.config.auth_key, 'audio', wipe=False)
+        batch_asr = getattr(self, 'asr_choice', None) in ('whisperx', 'qwen3', 'qwen3-0.6b', 'crisperwhisper', 'whisper')
+        self.audioreader = AudioStreamReader(self.audio_buffer, self.asr_audio_queue, self.audio_file, self.queue_put_timeout,self.config,STOP_SIGNAL,running_audio_processes, realtime=not batch_asr)
+        # Bound BEFORE the processor starts: an ASR that fails instantly
+        # completes at once, and its cleanup must find the hook + registry
+        # entry. Cancel / pre-emption from any socket reaches every worker;
+        # cleanup (claim, lease, completion post) runs through
+        # on_run_complete even if this socket is long gone.
+        self.processor.bind_run(asr=self.asr, reader=self.audioreader,
+                                audio_queue=self.asr_audio_queue, stop_signal=STOP_SIGNAL,
+                                on_finished=self.on_run_complete,
+                                live_check=lambda: live_pods_present(redis_client._redis()))
+        # A class starting mid-run pre-empts it (same stop path as cancel).
+        self._preempt_watch = PreemptionWatcher(redis_client._redis(), on_preempt=self.processor.preempt)
         # Store the processor (not just a flag) so a reconnecting client can
         # re-attach to it and resume receiving progress.
         running_audio_processes[self.config.auth_key] = self.processor
-        batch_asr = getattr(self, 'asr_choice', None) in ('whisperx', 'qwen3', 'qwen3-0.6b', 'crisperwhisper', 'whisper')
-        self.audioreader = AudioStreamReader(self.audio_buffer, self.asr_audio_queue, self.audio_file, self.queue_put_timeout,self.config,STOP_SIGNAL,running_audio_processes, realtime=not batch_asr)
-        
+        self._run_active = True  # run may now finish in the background if the client leaves
+        self.processor.start()
+        self._preempt_watch.start()
+        return True
+
 
     def _recover_audio_from_video(self):
         # The capture sometimes writes a header-only wav while the webm carries
@@ -506,6 +567,10 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
             key = getattr(getattr(self, 'config', None), 'auth_key', None)
             if key and key in running_audio_processes:
                 logging.info("Client gone but audio post-hoc run active — continuing in background.")
+                # The run holds its own references; this socket is done with
+                # the manager (left in, the sweep re-logged it every 10 s for
+                # the rest of the run).
+                cm.remove(self, None, None)
                 return
             self._run_active = False
         if self.asr:
@@ -516,22 +581,34 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
             self.audioreader.stop()
         if self.processorspeakermetric:
             self.processorspeakermetric.stop()
+        self._release_gpu()
 
         if self.config:
             cm.remove(self, self.config.session_key, self.config.auth_key)
+        else:
+            # Status probes never get a config; without this every one of
+            # them stayed in the manager forever (audit C.6).
+            cm.remove(self, None, None)
 
-    def on_run_complete(self):
-        # Called by the processor when a full run finishes. Clears the run guard,
-        # marks the pod complete server-side (survives a disconnected client),
-        # and detaches from the connection manager.
+    def on_run_complete(self, success=True):
+        # Called by the processor when a full run finishes (success=False:
+        # cancelled, pre-empted or failed; it has already posted
+        # posthoc_failed). Clears the run guard, marks the pod complete
+        # server-side on success (survives a disconnected client), releases
+        # the claim + GPU lease, and detaches from the connection manager.
         self._run_active = False
         try:
             if self.config:
                 running_audio_processes.pop(self.config.auth_key, None)
-                callbacks.post_posthoc_completed(self.config.auth_key, getattr(self, 'model_choices', None))
+                if success:
+                    callbacks.post_posthoc_completed(self.config.auth_key, getattr(self, 'model_choices', None))
                 cm.remove(self, self.config.session_key, self.config.auth_key)
         except Exception as e:
             logging.warning("on_run_complete cleanup failed: %s", e)
+        finally:
+            # After the ASR child exited: the processor only completes once
+            # the connector has put its end-of-stream sentinel.
+            self._release_gpu()
         # Queue-driven pods disconnect right after triggering, so signal_end
         # bails out early (_run_active) and its stop()s never run — worker
         # threads then outlive the run and pin this protocol together with the
@@ -595,6 +672,9 @@ if __name__ == '__main__':
     # Loopback only: nginx and the API's queue connect via 127.0.0.1.
     reactor.listenTCP(int(os.environ.get("DC_AUDIO_POSTHOC_WS_PORT", 9005)), factory, interface='127.0.0.1')
     logging.info('Audio Posthoc Processing Service started.')
+    # Claims left by a previous process of this service that died mid-run
+    # would block those pods for the 3 h TTL (audit C.4).
+    running_audio_processes.clear_stale()
     callbacks.post_service_restarted('audio')
     reactor.run()
     logging.info('Audio Posthoc Processing Service ended.')

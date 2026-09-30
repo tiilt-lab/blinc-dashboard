@@ -28,7 +28,16 @@ class _FakeRedis:
         return True
 
     def delete(self, key):
-        self.store.pop(key, None)
+        return 1 if self.store.pop(key, None) is not None else 0
+
+    def get(self, key):
+        return self.store.get(key)
+
+    def eval(self, script, numkeys, key, owner, *args):
+        # Owner-checked compare-and-delete / compare-and-expire (Phase 2).
+        if self.store.get(key) != owner:
+            return 0
+        return self.delete(key) if "'del'" in script else 1
 
     def exists(self, key):
         return 1 if key in self.store else 0

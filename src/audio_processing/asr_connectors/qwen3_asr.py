@@ -76,7 +76,8 @@ class Qwen3ASR(PosthocFileASR):
             data = run_json_worker(
                 lambda out_path: [worker_python("qwen_venv", 2), _WORKER,
                                   self.audio_file, self.model_id, out_path],
-                timeout=POSTHOC_WORKER_TIMEOUT)
+                timeout=POSTHOC_WORKER_TIMEOUT,
+                handle=getattr(self, 'worker', None))  # killable on cancel
             segments = data.get("segments", [])
             logging.info("Qwen3-ASR: %d segments", len(segments))
 
@@ -103,6 +104,7 @@ class Qwen3ASR(PosthocFileASR):
                 self.transcript_queue.put(result)
         except Exception as e:
             logging.error("Qwen3-ASR transcription failed: %s", e, exc_info=True)
+            self.fail(e)  # consumer keeps the pod's previous results
         finally:
             self.running = False
             self.transcript_queue.put(None)

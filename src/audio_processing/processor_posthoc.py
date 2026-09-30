@@ -32,6 +32,8 @@ from topic_modeling.topic_modeling import preprocess_transcript
 import config as cf
 from processing_common import select_topic_id, save_embeddings, load_embeddings
 from completion_latch import CompletionLatch
+from posthoc_staging import RunStaging, PREEMPTED, CANCELLED  # src/common
+from asr_connectors.base_asr import AsrFailed
 # from source_seperation import source_seperation_pre_trained
 # from server.topic_modeling.topicmodeling import get_topics_with_prob
 # For converting nano seconds to seconds.
@@ -57,6 +59,12 @@ class AudioProcessorPosthoc:
         # latch (double-fired the tagging POST / lost a decrement); the shared
         # latch removes that whole class of bug.
         self._latch = CompletionLatch(self.__complete_callback)
+        # Results are staged until the run is known good (audit C.3); the
+        # protocol binds the run's other workers + completion hook (bind_run).
+        self._staging = RunStaging()
+        self.on_finished = None
+        self.live_check = None
+        self._run_parts = {}
         self.mt_feats = np.array([])
         self.speakers = np.array([])
         self.signal = np.array([])
@@ -87,6 +95,7 @@ class AudioProcessorPosthoc:
         self.asr_complete = False
         # Fresh latch per run (start may be called again to reprocess).
         self._latch = CompletionLatch(self.__complete_callback)
+        self._staging = RunStaging()
         self.processing_thread = threading.Thread(target=self.process)
         self.processing_thread.daemon = True
         if self.config.topic_model:
@@ -99,18 +108,98 @@ class AudioProcessorPosthoc:
     def stop(self):
         self.running = False
 
+    def bind_run(self, asr=None, reader=None, audio_queue=None, stop_signal=None,
+                 on_finished=None, live_check=None):
+        """The protocol hands over the run's other workers, so a cancel from
+        ANY socket (or the queue, or the pre-emption watcher) stops all of
+        them, and completion cleanup no longer depends on the socket that
+        started the run."""
+        self._run_parts = {'asr': asr, 'reader': reader,
+                           'audio_queue': audio_queue, 'stop_signal': stop_signal}
+        self.on_finished = on_finished
+        self.live_check = live_check
+
+    def cancel(self):
+        """Abort: nothing gets posted; the ASR worker's process group is
+        killed; the claim and GPU lease are released once the pipeline has
+        drained (the None sentinel follows the child's exit) (audit C.5)."""
+        self.running = False
+        self._staging.cancel()
+        parts = self._run_parts
+        for name in ('asr', 'reader'):
+            worker = parts.get(name)
+            if worker is not None:
+                try:
+                    worker.stop()
+                except Exception:
+                    logging.exception('cancel: %s.stop() failed', name)
+        # Unblocks a streaming connector waiting on audio (Google path).
+        if parts.get('audio_queue') is not None and parts.get('stop_signal') is not None:
+            try:
+                parts['audio_queue'].put(parts['stop_signal'])
+            except Exception:
+                pass
+
+    def preempt(self):
+        """A live class started (PreemptionWatcher): cancel path, reported
+        as 'preempted' so the queue re-runs the pod later."""
+        self._staging.preempt()
+        self.cancel()
+
     def __complete_callback(self):
         logging.info("completing callback")
+        if not self.running:
+            self._staging.cancel()
+        failure = self._staging.failure()
+        # A class that started in the run's last seconds must not race the
+        # swap: check presence once more right before reset-and-post.
+        if failure is None and self.live_check is not None:
+            try:
+                if self.live_check():
+                    self._staging.preempt()
+                    failure = self._staging.failure()
+            except Exception:
+                logging.exception('final live-presence check failed; publishing anyway')
+        try:
+            if failure is None:
+                self._publish()
+            else:
+                self._abandon(failure)
+        except Exception as e:
+            logging.exception("post-hoc completion failed for %s", self.config.auth_key)
+            if failure is None:
+                failure = 'publishing results failed: %s' % e
+                try:
+                    callbacks.post_posthoc_failed(self.config.auth_key, 'audio', failure)
+                except Exception:
+                    pass
+        finally:
+            self._finish(success=failure is None)
+
+    def _publish(self):
+        staged = self._staging.ordered()
+        # Only now does the previous analysis go: its replacement is complete.
+        callbacks.post_posthoc_reset(self.config.auth_key, 'audio')
+        posted = 0
+        for kind, payload in staged:
+            if kind == 'metrics':
+                # GCA metrics are order-dependent: feed them in discussion
+                # order (not thread-finish order); it posts each one.
+                self.speaker_metrics_process.process_transcript(payload, action="posthoc_processing")
+                posted += 1
+            else:
+                success, transcript_id = callbacks.post_transcripts(**payload)
+                if success:
+                    posted += 1
+                else:
+                    logging.warning("Transcript @ %s FAILED to post for client %s",
+                                    payload['start_time'], self.config.auth_key)
+        logging.info('Posted %d/%d utterances for %s', posted, len(staged), self.config.auth_key)
         # The processor - not the stream reader - knows when every utterance
         # has been fully processed; signal the client here so completion is
         # correct even when the reader finishes in seconds (unpaced batch ASR).
         if self.web_socket_connection is not None:
             self.send_json({'type': 'process_completed', 'message': 'Audio posthoc analytics completed'})
-        '''
-        self.speaker_transcript_queue.put(None)
-        self.speaker_metrics_process.join()
-        self.speaker_metrics_process.close()
-        '''
         if self.config.diarization:
             try:
                 self.send_speaker_taggings()
@@ -129,11 +218,31 @@ class AudioProcessorPosthoc:
                     os.remove(_old)
             except OSError:
                 pass
-        # Release the run + mark it complete server-side, so the result persists
-        # even if the browser that triggered it has since disconnected.
+
+    def _abandon(self, reason):
+        logging.warning('Post-hoc run for %s abandoned (%s); previous results kept, %d staged utterance(s) dropped',
+                        self.config.auth_key, reason, len(self._staging))
+        callbacks.post_posthoc_failed(self.config.auth_key, 'audio', reason)
+        if self.web_socket_connection is None:
+            return
+        if reason == PREEMPTED:
+            from gpu_lease import PREEMPTED_REPLY
+            self.send_json(dict(PREEMPTED_REPLY))
+        elif reason == CANCELLED:
+            self.send_json({'type': 'error', 'code': 'posthoc_failed',
+                            'message': 'Analysis cancelled; the previous results were kept.'})
+        else:
+            self.send_json({'type': 'error', 'code': 'posthoc_failed',
+                            'message': 'Analysis failed (%s); the previous results were kept.' % reason})
+
+    def _finish(self, success):
+        # Release the run + mark it complete/failed server-side, so the
+        # outcome persists even if the browser that triggered it has left.
         try:
-            if self.web_socket_connection is not None and hasattr(self.web_socket_connection, 'on_run_complete'):
-                self.web_socket_connection.on_run_complete()
+            if self.on_finished is not None:
+                self.on_finished(success=success)
+            elif self.web_socket_connection is not None and hasattr(self.web_socket_connection, 'on_run_complete'):
+                self.web_socket_connection.on_run_complete(success=success)
         except Exception as ex:
             logging.warning("on_run_complete notify failed: %s", ex)
 
@@ -236,6 +345,12 @@ class AudioProcessorPosthoc:
             transcript_data = self.transcript_queue.get()
             if transcript_data is None:
                 self.asr_complete = True
+            elif isinstance(transcript_data, AsrFailed):
+                # The connector could not transcribe: the run is abandoned at
+                # completion; whatever follows is not worth processing.
+                self._staging.mark_asr_failed(transcript_data.reason)
+            elif not self.running or not self._staging.accepting:
+                continue  # cancelled / failed: drain without spawning work
             else:
                 # Gather audio data related to the transcript.
                 words = transcript_data.alternatives[0].words
@@ -268,6 +383,8 @@ class AudioProcessorPosthoc:
     # Processes a transcript and its related audio data.
     def process_transcript(self, transcript_data, audio_data, start_time, end_time):
         try:
+            if not self.running or not self._staging.accepting:
+                return  # cancelled / ASR failed: nothing from this run is posted
             processing_timer = time.time()
             words = transcript_data.alternatives[0].words
             # Get Transcripts and Questions
@@ -335,8 +452,9 @@ class AudioProcessorPosthoc:
                     # print confidence does not describe it.
                     confidence = None
 
-                # logging.info("processed for {0} : {1}".format(self.config.auth_key,[str(int(start_time//60))+':'+str(int(start_time%60)), str(int(end_time//60))+':'+str(int(end_time%60)),transcript_text,  speaker_tag, speaker_id]))
-                self.speaker_metrics_process.process_transcript(
+                # Staged; _publish feeds it to speaker_metrics_process (which
+                # computes the GCA metrics and posts) once the run is good.
+                self._staging.add(start_time, 'metrics',
                     {
                         'source': self.config.auth_key,
                         'start_time': start_time,
@@ -350,7 +468,7 @@ class AudioProcessorPosthoc:
                         'speaker_tag': speaker_tag,
                         'speaker_id': speaker_id,
                         'voice_features': part_voice_features({'confidence': confidence}),
-                    },action="posthoc_processing")
+                    })
             else:
                 if self.config.diarization:
                     if len(self.embeddings) == 0 and self.embeddings_file is not None:
@@ -402,20 +520,14 @@ class AudioProcessorPosthoc:
                         if ve:
                             vf['vocal_emotion'] = ve
                     voice_features = vf or None
-                success, transcript_id = callbacks.post_transcripts(
-                    self.config.auth_key, start_time, end_time,
-                    transcript_text, doa, questions, keywords,
-                    features, topic_id, speaker_tag, speaker_id,
-                    voice_features=voice_features)
-                
-                processing_time = time.time() - processing_timer
-
-                if success:
-                    logging.info( f"Processing results posted successfully for client {self.config.auth_key} (Processing time: {processing_time}) @ {start_time} for transcript {transcript_id}")
-                else:
-                    logging.warning("Processing results FAILED to post for"
-                                    " client %s (Processing time: %f)",
-                                    self.config.auth_key, processing_time)
+                # Staged for _publish (posted via callbacks.post_transcripts).
+                self._staging.add(start_time, 'transcript', dict(
+                    source=self.config.auth_key, start_time=start_time, end_time=end_time,
+                    transcript=transcript_text, doa=doa, questions=questions, keywords=keywords,
+                    features=features, topic_id=topic_id, speaker_tag=speaker_tag,
+                    speaker_id=speaker_id, voice_features=voice_features))
+                logging.info("Processed utterance @ %s for client %s (Processing time: %f)",
+                             start_time, self.config.auth_key, time.time() - processing_timer)
 
             # Get source seperation
             # if self.config.source_seperation:
@@ -427,10 +539,14 @@ class AudioProcessorPosthoc:
             # entire pod's transcripts across multiple runs.
             logging.exception("Processing FAILED for client %s: %s",
                               self.config.auth_key, e)
-
-        # Check if this was the final process of the transmission. Routed
-        # through the shared latch (was an unlocked decrement + direct
-        # __complete_callback that bypassed the exactly-once guard).
-        self._latch.task_done()
+            # A lost utterance fails the run (posted-vs-emitted check): the
+            # old results stay rather than a silently incomplete new set.
+            self._staging.mark_failed()
+        finally:
+            # Check if this was the final process of the transmission. Routed
+            # through the shared latch (was an unlocked decrement + direct
+            # __complete_callback that bypassed the exactly-once guard). In a
+            # finally so the early return above still counts down.
+            self._latch.task_done()
 
        

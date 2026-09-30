@@ -97,8 +97,12 @@ def post_transcripts(source, start_time, end_time, transcript, doa, questions, k
         return True, -1
 
 
-def post_posthoc_reset(source, scope):
-    callbacks_common.post_posthoc_reset(_callback_base(), source, scope)
+def post_posthoc_reset(source, scope, wipe=True):
+    callbacks_common.post_posthoc_reset(_callback_base(), source, scope, wipe=wipe)
+
+
+def post_posthoc_failed(source, scope, reason):
+    callbacks_common.post_posthoc_failed(_callback_base(), source, scope, reason)
 
 
 def post_posthoc_completed(source, models=None, scope='audio'):

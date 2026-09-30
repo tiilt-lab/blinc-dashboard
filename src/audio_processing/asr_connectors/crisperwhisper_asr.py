@@ -507,12 +507,14 @@ class CrisperWhisperPosthocASR(PosthocFileASR):
                 lambda out_path: [_worker_python(), _WORKER,
                                   "--oneshot", self.audio_file, out_path,
                                   "--model", self.model_id, "--mode", self.mode],
-                timeout=POSTHOC_WORKER_TIMEOUT)
+                timeout=POSTHOC_WORKER_TIMEOUT,
+                handle=getattr(self, 'worker', None))  # killable on cancel
             words = data.get("words", [])
             logging.info("CrisperWhisper: %d words", len(words))
             _emit_segments(self.transcript_queue, words)
         except Exception as e:
             logging.error("CrisperWhisper transcription failed: %s", e, exc_info=True)
+            self.fail(e)  # consumer keeps the pod's previous results
         finally:
             self.running = False
             self.transcript_queue.put(None)

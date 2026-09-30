@@ -18,6 +18,7 @@ protobuf objects of this shape, so it does not need the adapters.
 import json
 import os
 import queue as _queue_module
+import signal
 import subprocess
 import sys
 import tempfile
@@ -25,6 +26,67 @@ import threading
 from contextlib import contextmanager
 
 NANO = 1_000_000_000
+
+
+class AsrFailed:
+    """Transcript-queue marker a post-hoc connector puts BEFORE the None
+    sentinel when transcription failed (worker crash, CUDA OOM, timeout,
+    cancel), so the consumer can tell "no speech" from "no ASR" and keep the
+    pod's previous results (audit C.3)."""
+
+    def __init__(self, reason):
+        self.reason = str(reason)
+
+
+def _signal_group(proc, sig):
+    try:
+        os.killpg(proc.pid, sig)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+class WorkerHandle:
+    """Kill switch for a one-shot worker. run_json_worker starts the worker
+    in its own session (process group) and attaches it here; terminate()
+    ends the whole group — SIGTERM now, SIGKILL after GRACE seconds from a
+    helper thread — without blocking the caller, so a cancel from the
+    reactor frees the GPU instead of waiting up to 2 h (audit C.5)."""
+
+    GRACE = 10.0
+
+    def __init__(self):
+        self._proc = None
+        self._lock = threading.Lock()
+        self.killed = False
+
+    def attach(self, proc):
+        with self._lock:
+            self._proc = proc
+            late = self.killed  # terminate() raced the spawn
+        if late:
+            _signal_group(proc, signal.SIGKILL)
+
+    def terminate(self, grace=GRACE):
+        with self._lock:
+            self.killed = True
+            proc = self._proc
+        if proc is None or proc.poll() is not None:
+            return
+        _signal_group(proc, signal.SIGTERM)
+
+        def _escalate():
+            try:
+                proc.wait(timeout=grace)
+            except subprocess.TimeoutExpired:
+                _signal_group(proc, signal.SIGKILL)
+
+        threading.Thread(target=_escalate, name="worker-kill", daemon=True).start()
+
+    def wait(self, timeout=None):
+        with self._lock:
+            proc = self._proc
+        if proc is not None:
+            proc.wait(timeout=timeout)
 
 # One documented budget for the post-hoc one-shot workers. Whole-recording
 # transcription of a long session can run several times slower than real time
@@ -48,19 +110,37 @@ def worker_python(venv_dir, levels_up):
     return dedicated if os.path.exists(dedicated) else sys.executable
 
 
-def run_json_worker(build_argv, timeout):
+def run_json_worker(build_argv, timeout, handle=None):
     """Run a subprocess that writes its result as JSON to a temp path and
     return the parsed dict. ``build_argv(out_path)`` returns the full argv with
     ``out_path`` placed wherever that worker expects it (the two workers put it
-    at different positions). Raises RuntimeError on a non-zero exit. Always
-    removes the temp file.
+    at different positions). Raises RuntimeError on a non-zero exit, a timeout
+    (the worker's process group is killed first) or a cancel through
+    ``handle`` (a WorkerHandle). Always removes the temp file.
     """
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
         out_path = tf.name
     try:
-        proc = subprocess.run(build_argv(out_path), capture_output=True, timeout=timeout)
+        # Own session: a timeout or cancel can kill the worker AND anything it
+        # spawned, instead of leaving it on the GPU for the full budget.
+        proc = subprocess.Popen(build_argv(out_path), stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, start_new_session=True)
+        if handle is not None:
+            handle.attach(proc)
+        try:
+            _, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _signal_group(proc, signal.SIGTERM)
+            try:
+                proc.wait(timeout=WorkerHandle.GRACE)
+            except subprocess.TimeoutExpired:
+                _signal_group(proc, signal.SIGKILL)
+            proc.communicate()
+            raise RuntimeError("worker timed out after %ds" % timeout)
+        if handle is not None and handle.killed:
+            raise RuntimeError("worker cancelled")
         if proc.returncode != 0:
-            raise RuntimeError("worker failed: %s" % proc.stderr.decode()[-500:])
+            raise RuntimeError("worker failed: %s" % stderr.decode()[-500:])
         with open(out_path) as f:
             return json.load(f)
     finally:
@@ -164,6 +244,8 @@ class PosthocFileASR:
 
     def start(self):
         self.running = True
+        self.error = None            # set by fail(); the failure reason
+        self.worker = WorkerHandle()  # subclasses pass it to run_json_worker
         threading.Thread(target=self._drain_queue, daemon=True,
                          name="%s-queue-drain" % self.DRAIN_NAME).start()
         threading.Thread(target=self._transcribe_file, daemon=True,
@@ -171,6 +253,17 @@ class PosthocFileASR:
 
     def stop(self):
         self.running = False
+        # Cancel / teardown ends the worker's process group too: the flag
+        # alone left it transcribing (and posting) for up to 2 h (audit C.5).
+        worker = getattr(self, 'worker', None)
+        if worker is not None:
+            worker.terminate()
+
+    def fail(self, reason):
+        """Record a failed transcription and tell the consumer, ahead of the
+        None sentinel the subclass's finally still puts."""
+        self.error = str(reason)
+        self.transcript_queue.put(AsrFailed(self.error))
 
     def _drain_queue(self):
         while self.running:

@@ -286,3 +286,7 @@ def post_posthoc_reset(source, scope):
 
 def post_posthoc_completed(source, models=None, scope='video'):
     callbacks_common.post_posthoc_completed(_callback_base(), source, models, scope)
+
+
+def post_posthoc_failed(source, scope, reason):
+    callbacks_common.post_posthoc_failed(_callback_base(), source, scope, reason)

@@ -94,6 +94,7 @@ class WhisperXASR(PosthocFileASR):
             logging.info("WhisperX: emitted %d transcript results", emitted)
         except Exception as e:
             logging.error("WhisperX transcription failed: %s", e, exc_info=True)
+            self.fail(e)  # consumer keeps the pod's previous results
         finally:
             # The GPU models are freed inside _run_gpu_pipeline (per attempt);
             # this is a final safety release of any residual cache.

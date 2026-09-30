@@ -82,10 +82,20 @@ def post_disconnect(disconnect_url, source):
     return True
 
 
-def post_posthoc_reset(callback_base, source, scope):
+def post_posthoc_reset(callback_base, source, scope, wipe=True):
     # Ask the server to wipe this pod's previous results before a full re-run.
+    # wipe=False only marks the run as running (the audio service now keeps
+    # the old results until its new ones are complete; audit C.3).
     _post_best_effort(callback_base + '/posthoc_reset',
-                      {'source': source, 'scope': scope}, 'posthoc_reset')
+                      {'source': source, 'scope': scope, 'wipe': bool(wipe)}, 'posthoc_reset')
+
+
+def post_posthoc_failed(callback_base, source, scope, reason):
+    # The run did NOT finish (ASR crash, cancel, pre-emption, timeout): clear
+    # the running flag but leave the pod's results and analysed status alone.
+    _post_best_effort(callback_base + '/posthoc_failed',
+                      {'source': source, 'scope': scope, 'reason': str(reason)[:1000]},
+                      'posthoc_failed')
 
 
 def post_posthoc_completed(callback_base, source, models, scope):

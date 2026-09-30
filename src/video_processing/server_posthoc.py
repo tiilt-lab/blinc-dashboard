@@ -71,6 +71,7 @@ running_video_processes = PodRegistry(redis_factory=redis_client._redis,
 # per-alias token /addstudent minted (common/enrollment_token).
 from posthoc_ticket import ticket_allows
 from enrollment_token import enrollment_allows
+from gpu_lease import acquire_for_run, PreemptionWatcher, GPU_BUSY_REPLY
 _TICKETED_TYPES = frozenset((
     'Initialize_video_processing_analytics',
     'cancel_posthoc',
@@ -175,11 +176,22 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
         # True while a run is processing; keeps signal_end from killing it when
         # the client disconnects (the run finishes + marks itself complete).
         self._run_active = False
+        # GPU admission (common/gpu_lease): slot lease + live-class watcher.
+        self._gpu_lease = None
+        self._preempt_watch = None
 
         cm.add(self)
         logging.info('New client connected...')
 
     # onMessage / onClose come from WsMessageMixin (shared across both services).
+
+    def _release_gpu(self):
+        watch, self._preempt_watch = self._preempt_watch, None
+        if watch is not None:
+            watch.stop()
+        lease, self._gpu_lease = self._gpu_lease, None
+        if lease is not None:
+            lease.release()
 
     def _authorised(self, data):
         if ticket_allows(redis_client._redis(), data.get('ticket'), data.get('sessiondeviceid')):
@@ -254,6 +266,15 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
                     logging.info("Configuration setting failed for video posthoc processing")
                 else:
                     self.config = result
+                    # GPU admission before the per-run model loads below
+                    # (audit C.1): refuse while a class streams or another
+                    # run holds the slot; the queue re-enqueues on gpu_busy.
+                    self._gpu_lease = acquire_for_run(
+                        redis_client._redis(), owner='video-posthoc:%d:%s' % (os.getpid(), key))
+                    if self._gpu_lease is None:
+                        running_video_processes.pop(key, None)
+                        self.send_json(dict(GPU_BUSY_REPLY))
+                        return
                     # Optional per-run model choices from the trigger UI; fall
                     # back to the deployment config when the field is absent.
                     try:
@@ -265,6 +286,7 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
                         # instead of dying mid-analysis.
                         logging.exception("Per-run model selection failed")
                         running_video_processes.pop(key, None)
+                        self._release_gpu()
                         self.send_json({'type': 'error', 'message': str(e)})
                         return
                     self.video_metric_analytics = VideoMetricAnalytics(
@@ -316,15 +338,32 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
             # Full re-run REPLACES the pod's previous video metrics.
             callbacks.post_posthoc_reset(self.config.auth_key, 'video')
             self.video_processor.add_websocket_connection(self)
-            self.video_processor.start()
-            self._run_active = True  # may now finish in the background if the client leaves
-            # Store the processor so a reconnecting client can re-attach.
+            # Cleanup (claim, lease, completion/failure post) runs through
+            # on_run_complete even if this socket is long gone.
+            self.video_processor.on_finished = self.on_run_complete
+            # Store the processor so a reconnecting client can re-attach
+            # (before start(): a run that ends at once must not leave a
+            # stale entry behind its own cleanup).
             running_video_processes[self.config.auth_key] = self.video_processor
+            self._run_active = True  # may now finish in the background if the client leaves
+            self.video_processor.start()
+            # A class starting mid-run pre-empts it (same stop path as cancel).
+            self._preempt_watch = PreemptionWatcher(redis_client._redis(), on_preempt=self.video_processor.preempt)
+            self._preempt_watch.start()
 
         if data['type'] == 'cancel_posthoc':
             sdid = str(data.get('sessiondeviceid', ''))
             hits = [k for k in list(running_video_processes.keys()) if k.startswith(sdid + '-')]
             for k in hits:
+                proc = running_video_processes.get(k)
+                if hasattr(proc, 'cancel'):
+                    # The run stops at its next chunk and releases the claim
+                    # + GPU lease itself (on_run_complete) (audit C.5).
+                    try:
+                        proc.cancel()
+                    except Exception:
+                        logging.exception('cancel failed for %s', k)
+                    continue
                 proc = running_video_processes.pop(k, None)
                 if hasattr(proc, 'stop'):
                     try:
@@ -407,6 +446,11 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
         # common/reactor_safety.
         reactor_safety.send_json(self, message)
 
+    def send_close(self, message):
+        # The inactivity sweep calls this; it was missing here, so the sweep
+        # crashed on its first stale connection (audit C.6).
+        self.send_json({'type': 'end', 'message': message})
+
     def signal_start(self):
         self.video_processor = VideoProcessorPosthoc(self.facial_emotion_detector,self.image_object_detection,self.attention_detection,self.video_metric_analytics,
                                                      self.video_file,self.config,running_video_processes,self.interval,self.batch_size,self.frame_dir,STOP_SIGNAL,save_gaze_annotation=True)
@@ -414,14 +458,27 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
         # Don't kill an in-flight run on a client disconnect / timeout — it
         # finishes in the background and marks itself complete (on_run_complete).
         if getattr(self, '_run_active', False):
-            logging.info("Client gone but video post-hoc run active — continuing in background.")
-            return
+            key = getattr(getattr(self, 'config', None), 'auth_key', None)
+            if key and key in running_video_processes:
+                logging.info("Client gone but video post-hoc run active — continuing in background.")
+                cm.remove(self, None, None)  # the run holds its own references
+                return
+            self._run_active = False  # stale flag: the run already finished
         if self.video_processor:
             self.video_processor.stop()
+        if self.config and not self._run_active:
+            # Initialised but never started (client left first): free the pod.
+            running_video_processes.pop(self.config.auth_key, None)
+        self._release_gpu()
+        # Every connection leaves the manager (status probes leaked before).
+        cm.remove(self, getattr(self.config, 'session_key', None) if self.config else None,
+                  getattr(self.config, 'auth_key', None) if self.config else None)
 
-    def on_run_complete(self):
-        # Called by the processor when the run finishes: release the guard and
-        # mark the pod complete server-side (survives a disconnected client).
+    def on_run_complete(self, success=True, reason=None):
+        # Called by the processor when the run finishes (success=False:
+        # cancelled, pre-empted or failed). Releases the guard; marks the pod
+        # complete server-side on success (survives a disconnected client) or
+        # reports posthoc_failed; releases the claim + GPU lease.
         self._run_active = False
         # Per-pod CUDA cleanup: batch runs grew this process ~1.5 GiB per pod
         # until whisperx in the AUDIO service could no longer load (shared
@@ -441,16 +498,22 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
         # so the artifact exists before the pod is stamped complete; best-effort
         # so an ASD failure never fails the video run itself.
         try:
-            if getattr(self, 'asd_choice', None) == 'talknce' and getattr(self, 'video_file', None):
+            if success and getattr(self, 'asd_choice', None) == 'talknce' and getattr(self, 'video_file', None):
                 self.run_asd_pass()
         except Exception as e:
             logging.warning("ASD pass failed: %s", e)
         try:
             if self.config:
                 running_video_processes.pop(self.config.auth_key, None)
-                callbacks.post_posthoc_completed(self.config.auth_key, getattr(self, 'model_choices', None))
+                if success:
+                    callbacks.post_posthoc_completed(self.config.auth_key, getattr(self, 'model_choices', None))
+                else:
+                    # Clears the running flag; the pod is NOT marked analysed.
+                    callbacks.post_posthoc_failed(self.config.auth_key, 'video', reason or 'failed')
         except Exception as e:
             logging.warning("video on_run_complete cleanup failed: %s", e)
+        finally:
+            self._release_gpu()
         # Called from the processor's worker thread; callLater must happen on
         # the reactor thread.
         if not running_video_processes:
@@ -498,6 +561,9 @@ if __name__ == '__main__':
 
     # Run Server
     logging.info('Starting Video Posthoc Processing Service...')
+    # Claims left by a previous process of this service that died mid-run
+    # would block those pods for the 3 h TTL (audit C.4).
+    running_video_processes.clear_stale()
     callbacks.post_service_restarted('video')
     poll_connections = task.LoopingCall(cm.check_connections)
     poll_connections.start(10.0)

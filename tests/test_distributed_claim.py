@@ -32,7 +32,22 @@ class _FakeRedis:
     def delete(self, key):
         if self.fail:
             raise RuntimeError("redis down")
-        self.store.pop(key, None)
+        return 1 if self.store.pop(key, None) is not None else 0
+
+    def get(self, key):
+        if self.fail:
+            raise RuntimeError("redis down")
+        return self.store.get(key)
+
+    def eval(self, script, numkeys, key, owner, *args):
+        # Owner-checked compare-and-delete / compare-and-expire (Phase 2).
+        if self.fail:
+            raise RuntimeError("redis down")
+        if self.store.get(key) != owner:
+            return 0
+        if "'del'" in script:
+            return self.delete(key)
+        return 1
 
     def exists(self, key):
         if self.fail:

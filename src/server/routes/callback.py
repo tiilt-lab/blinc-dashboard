@@ -136,12 +136,45 @@ def posthoc_reset(**kwargs):
     content = request.get_json() or {}
     device = database.get_session_devices(processing_key=content.get('source', ''))
     if device:
-        # Keep serving the last-known duration while the wipe+re-run is in
-        # flight (it is derived from the transcripts being deleted).
-        posthoc_state.remember_duration(device.id, database.get_pod_duration(device.id))
-        database.delete_pod_analysis(device.id, scope=content.get('scope', 'audio'))
-        posthoc_state.mark_running(device.id, content.get('scope', 'audio'))
-        logging.info('Post-hoc reset (%s) for device %d.', content.get('scope'), device.id)
+        scope = content.get('scope', 'audio')
+        # wipe=False: the audio service marks the run as running at start
+        # and wipes only when its new results are complete (audit C.3).
+        if content.get('wipe', True):
+            # Keep serving the last-known duration while the wipe+re-run is in
+            # flight (it is derived from the transcripts being deleted).
+            posthoc_state.remember_duration(device.id, database.get_pod_duration(device.id))
+            database.delete_pod_analysis(device.id, scope=scope)
+        # A second reset within one run (the wipe at the end) must not
+        # restart the clock the completion duration is measured from.
+        if posthoc_state.elapsed_seconds(device.id, scope) is None:
+            posthoc_state.mark_running(device.id, scope)
+        logging.info('Post-hoc reset (%s, wipe=%s) for device %d.', scope, content.get('wipe', True), device.id)
+    return json_response()
+
+
+@api_routes.route('/api/v1/callback/posthoc_failed', methods=['POST'])
+@wrappers.verify_local
+def posthoc_failed(**kwargs):
+    # A processing service reports that a pod's post-hoc run did NOT finish
+    # (ASR crash / CUDA OOM, cancel, pre-emption by a live class, timeout).
+    # Clears the running flag exactly like posthoc_completed, but leaves the
+    # pod's stored results and its analysed status alone (audit C.3). The
+    # reason goes to the log and to a short-lived Redis key the queue can
+    # read; no schema change.
+    content = request.get_json() or {}
+    scope = content.get('scope') or 'audio'
+    reason = str(content.get('reason') or 'unknown')[:1000]
+    device = database.get_session_devices(processing_key=content.get('source', ''))
+    if device:
+        elapsed = posthoc_state.elapsed_seconds(device.id, scope)
+        posthoc_state.mark_done(device.id, scope)
+        logging.warning('Post-hoc %s run FAILED for device %d after %ss (results kept): %s',
+                        scope, device.id, elapsed, reason)
+        try:
+            from redis_helper import r as _r
+            _r.setex('posthoc_failed:{0}:{1}'.format(device.id, scope), 3600, reason)
+        except Exception as e:
+            logging.info('posthoc_failed: could not record reason in Redis: %s', e)
     return json_response()
 
 

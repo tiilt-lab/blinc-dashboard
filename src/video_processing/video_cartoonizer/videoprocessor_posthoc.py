@@ -61,14 +61,37 @@ class VideoProcessorPosthoc:
        
     def start(self):
         self.running = True
+        self.cancelled = False
+        self.preempted = False
+        self._error = None
         self._started_at = time.time()  # epoch; sent to clients so elapsed survives refresh
         self.vid_pro_thread = threading.Thread(target=self.processing, name="video_posthoc_processing")
         self.vid_pro_thread.daemon = True
         self.vid_pro_thread.start()
-        
+
     def stop(self):
         self.running = False
         # self.vid_pro_thread.join()
+
+    def cancel(self):
+        # The loop stops at its next chunk; the finally below reports the
+        # run as not completed (posthoc_failed) instead of completed.
+        self.cancelled = True
+        self.running = False
+
+    def preempt(self):
+        # A live class started (PreemptionWatcher): cancel path, reported as
+        # 'preempted' so the queue re-runs the pod when the class ends.
+        self.preempted = True
+        self.cancel()
+
+    def outcome(self):
+        """None when the run completed; else why it did not."""
+        if self.preempted:
+            return 'preempted'
+        if self.cancelled:
+            return 'cancelled'
+        return self._error
 
     def add_websocket_connection(self,web_socket):
         self.web_socket_connection = web_socket
@@ -243,25 +266,40 @@ class VideoProcessorPosthoc:
                                 final_audio_file
                             ], check=True)
                 vidclip.close()
-        except Exception:
+        except Exception as e:
             error_str = traceback.format_exc()
+            self._error = '%s: %s' % (type(e).__name__, e)
             logging.warning('Exception thrown while Processing video posthoc video image extraction {0} {1}'.format(error_str, self.config.auth_key))
         finally:
                 try:
                     logging.info("called finally after thread stop initiated")
+                    failure = self.outcome()
                     self.running_video_processes.pop(self.config.auth_key,None)
+                    # The last_batch flush also unregisters this pod's queue
+                    # state downstream, so it runs on every outcome.
                     payload = build_frame_payload(self.frame_batch, self.facialEmbeddings, self.batch_track, self.time_marker, self.vid_img_dir, self.config.auth_key, True)
-                    
-                    accumulator_load = self.image_object_detection.worker_posthoc(payload) 
+
+                    accumulator_load = self.image_object_detection.worker_posthoc(payload)
                     self.video_metric_analytics.worker(accumulator_load, post_always=True)
-                    
+
                     logging.info('Video Processor Posthoc  stopped for {0}.'.format(self.config.auth_key))
-                    self.send_json({'type': 'process_completed', 'message': "Video posthoc analytics completed"})
-                    # Mark complete server-side so it persists even if the
-                    # triggering browser disconnected.
+                    if failure is None:
+                        self.send_json({'type': 'process_completed', 'message': "Video posthoc analytics completed"})
+                    elif failure == 'preempted':
+                        from gpu_lease import PREEMPTED_REPLY  # src/common
+                        self.send_json(dict(PREEMPTED_REPLY))
+                    else:
+                        logging.warning('Video post-hoc run for %s did not complete: %s', self.config.auth_key, failure)
+                        self.send_json({'type': 'error', 'code': 'posthoc_failed',
+                                        'message': 'Video analysis %s.' % ('cancelled' if failure == 'cancelled' else 'failed (%s)' % failure)})
+                    # Mark complete/failed server-side so it persists even if
+                    # the triggering browser disconnected.
                     try:
-                        if self.web_socket_connection is not None and hasattr(self.web_socket_connection, 'on_run_complete'):
-                            self.web_socket_connection.on_run_complete()
+                        on_finished = getattr(self, 'on_finished', None)
+                        if on_finished is None and self.web_socket_connection is not None and hasattr(self.web_socket_connection, 'on_run_complete'):
+                            on_finished = self.web_socket_connection.on_run_complete
+                        if on_finished is not None:
+                            on_finished(success=failure is None, reason=failure)
                     except Exception as ex:
                         logging.warning("video on_run_complete notify failed: %s", ex)
                 except Full:
