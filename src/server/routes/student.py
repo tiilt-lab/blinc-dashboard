@@ -7,6 +7,7 @@ import database
 import wrappers
 import utility
 from utility import json_response
+from redis_helper import RedisEnrollmentToken
 
 api_routes = Blueprint('student', __name__)
 
@@ -185,7 +186,11 @@ def add_students(**kwargs):
     success, student = database.add_student(lastname, firstname,username)
     if success:
         database.save_changes()
-        return json_response(student.json())
+        body = student.json()
+        # The enrollment sockets accept media for this alias only with this
+        # token (common/enrollment_token); the sign-up page sends it on both.
+        body['enrollment_token'] = RedisEnrollmentToken.mint(student.username)
+        return json_response(body)
     else:
         # Existing username: allow self-service re-enrollment when the entered
         # name matches the record (students have no passwords; the name check
@@ -197,9 +202,14 @@ def add_students(**kwargs):
             (student.firstname or '').strip().lower() == firstname.strip().lower()
             and (student.lastname or '').strip().lower() == lastname.strip().lower()
         )
-        return json_response({'message': "Username already exists.",
-                              "data": student.json(),
-                              "reenroll_allowed": name_matches}, 400)
+        body = {'message': "Username already exists.",
+                "data": student.json(),
+                "reenroll_allowed": name_matches}
+        if name_matches:
+            # Same token as the create path: only a name-matched re-enrolment
+            # may replace the stored voice/face print.
+            body['enrollment_token'] = RedisEnrollmentToken.mint(student.username)
+        return json_response(body, 400)
        
         
 @api_routes.route('/api/v1/student/updatestudent', methods=['POST'])

@@ -14,6 +14,7 @@ if _COMMON not in sys.path:
     sys.path.insert(0, _COMMON)
 from redis_client import RedisSessions as _CommonRedisSessions
 import posthoc_ticket as _posthoc_ticket  # key format shared with the post-hoc services
+import enrollment_token as _enrollment_token  # key format shared with the enrollment sockets
 
 r = redis.StrictRedis(host=cf.redis_host(), port=cf.redis_port(), db=cf.redis_db(), decode_responses=True)
 
@@ -96,6 +97,16 @@ class RedisPosthocTicket:
     @staticmethod
     def mint(session_device_id):
         return _posthoc_ticket.mint(r, session_device_id)
+
+class RedisEnrollmentToken:
+    # Short-lived per-alias credential for the enrollment websockets, minted
+    # by /student/addstudent; the services verify it through
+    # common/enrollment_token (same key and TTL).
+    TTL = _enrollment_token.TOKEN_TTL
+
+    @staticmethod
+    def mint(username):
+        return _enrollment_token.mint(r, username)
 
 
 if __name__ == '__main__':

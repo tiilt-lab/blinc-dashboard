@@ -7,6 +7,12 @@ import { useNavigate } from "react-router-dom"
 import fixWebmDuration from "fix-webm-duration"
 import { ensureGetUserMedia } from "../utilities/media"
 
+// Reply from either processing socket when the addstudent enrollment token is
+// missing, expired or minted for another alias (audio server.py / video
+// server_posthoc.py). It arrives before the recording page exists, so it is
+// shown as the page alert rather than the inline enrollStatus.
+const ENROLLMENT_DENIED = "Enrollment not authorised. Start again from the sign-up page."
+
 
 function SignupPage() {
     const [pageTitle] = useState("Create Account")
@@ -257,6 +263,24 @@ function SignupPage() {
         }
     };
 
+    // Token rejected: tell the student on the sign-up form and stop. Both
+    // sockets are closed quietly (their onclose would otherwise replace this
+    // with the generic "Disconnected" alert) so no media is ever sent.
+    const stopEnrollment = (message) => {
+        for (const ws of [audiows, videows]) {
+            if (ws.current !== null) {
+                ws.current.onclose = null
+                ws.current.close()
+                ws.current = null
+            }
+        }
+        setAudioAuthenticated(false)
+        setVideoAuthenticated(false)
+        setCurrentForm("")
+        setAlertMessage(message)
+        setShowAlert(true)
+    }
+
     const saveRecording = async (videoBlob, duration) => {
         if (videoBlob) {
             if (mimetype.startsWith('video/webm')) {
@@ -499,6 +523,10 @@ function SignupPage() {
 
                 // }
                 else if (message['type'] === 'error') {
+                    if (message['message'] === ENROLLMENT_DENIED) {
+                        stopEnrollment(message['message'])
+                        return
+                    }
                     stopRecording();
                     setCurrentForm("")
                     setEnrollStatus({
@@ -558,6 +586,10 @@ function SignupPage() {
 
                 // }
                 else if (message['type'] === 'error') {
+                    if (message['message'] === ENROLLMENT_DENIED) {
+                        stopEnrollment(message['message'])
+                        return
+                    }
                     stopRecording();
                     setCurrentForm("")
                     setEnrollStatus({
@@ -593,6 +625,7 @@ function SignupPage() {
             stage: "start",
             id: studentObject.id,
             alias: studentObject.username,
+            token: studentObject.enrollment_token,
             start_time: 0.0,
             sample_rate: 16000,
             encoding: "pcm_f16le",

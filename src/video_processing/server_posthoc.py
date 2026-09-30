@@ -67,8 +67,10 @@ running_video_processes = PodRegistry(redis_factory=redis_client._redis,
 # Any message that names a pod must carry a ticket the API minted for THAT pod
 # (common/posthoc_ticket): this socket is reachable by anyone through nginx,
 # and a start wipes the pod's previous analysis. The enrollment message
-# (save-audio-video-fingerprinting) names no pod and is out of scope here.
+# (save-audio-video-fingerprinting) names no pod; it carries instead the
+# per-alias token /addstudent minted (common/enrollment_token).
 from posthoc_ticket import ticket_allows
+from enrollment_token import enrollment_allows
 _TICKETED_TYPES = frozenset((
     'Initialize_video_processing_analytics',
     'cancel_posthoc',
@@ -193,6 +195,13 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
             return
         
         if data['type'] == 'save-audio-video-fingerprinting':
+            # Gate first (same as the audio side): a passing enrollment
+            # replaces the alias's face embedding, and process_binary only
+            # accepts media once stream_data is set below.
+            if not enrollment_allows(redis_client._redis(), data.get('token'), data.get('alias')):
+                logging.warning('rejected fingerprint enrollment: bad token for alias %r', data.get('alias'))
+                self.send_json({'type': 'error', 'message': 'Enrollment not authorised. Start again from the sign-up page.'})
+                return
             self.currStudent = data['id']
             self.stream_data = data['streamdata']
             # alias/extension build file paths — sanitize or reject.

@@ -27,6 +27,8 @@ import reactor_safety  # reactor/thread boundary; src/common bootstrapped above
 from ws_protocol import WsMessageMixin  # shared onMessage/onClose
 import audio_bytes
 import safe_names
+import redis_client  # shared lazy client (src/common); enrollment tokens live beside the session keys
+from enrollment_token import enrollment_allows
 from audio_buffer import AudioBuffer
 import asr_ingest  # reactor-side ingest bookkeeping (stamped chunks, drop counter)
 from processor import AudioProcessor
@@ -114,6 +116,14 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
                 logging.info("preparing for speaker {}'s fingerprint".format(self.currSpeaker))
         
         if data['type'] == 'save-audio-video-fingerprinting':
+            # Gate first: this socket is public and a passing enrollment
+            # replaces (or, on a failed quality gate, deletes) the alias's
+            # voice print. Nothing is stored -- so no binary is accepted --
+            # until the token /addstudent minted for THIS alias checks out.
+            if not enrollment_allows(redis_client._redis(), data.get('token'), data.get('alias')):
+                logging.warning('rejected fingerprint enrollment: bad token for alias %r', data.get('alias'))
+                self.send_json({'type': 'error', 'message': 'Enrollment not authorised. Start again from the sign-up page.'})
+                return
             self.currStudent = data['id']
             self.stream_data  = data['streamdata']
             # alias/extension come straight off the socket and build file
@@ -133,6 +143,11 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
             self.send_json({'type':'saveaudiovideo'})
 
         if data['type'] == 'fingerprint-force':
+            # Only meaningful once an authorised enrollment is in progress on
+            # this connection (stream_data is set after the token check).
+            if getattr(self, 'stream_data', None) != 'audio-video-fingerprint':
+                logging.warning('ignored fingerprint-force with no authorised enrollment in progress')
+                return
             self.fingerprint_force = True
             logging.info('fingerprint quality gate disabled for %s after repeated failures', self.currAlias)
 

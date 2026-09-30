@@ -108,6 +108,9 @@ class AuthService {
           response.json().then(
             userobj => {
               const student = StudentModel.fromJson(userobj);
+              // Carried to the enrollment sockets by the sign-up page (not a
+              // student field, so fromJson drops it).
+              student.enrollment_token = userobj["enrollment_token"]
               setStudentObject(student)
             }
           )
@@ -116,6 +119,7 @@ class AuthService {
             err => {
               if (err["message"] === "Username already exists."){
                 const student = StudentModel.fromJson(err["data"] );
+                student.enrollment_token = err["enrollment_token"]  // only present when the name matched
                 // Re-enrollment is self-service: proceed to the recording page
                 // whenever the entered name matches the existing record (the
                 // server checks). A new recording replaces the old biometrics.
