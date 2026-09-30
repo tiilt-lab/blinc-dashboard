@@ -16,7 +16,8 @@ const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1)
 // Who can reach a folder, and (for its managers and admins) who to add. Access
 // flows down the tree, so people granted on a folder above this one are
 // listed too, marked with where their access comes from; they can only be
-// changed there.
+// changed there. Admin and super accounts reach every folder by role and are
+// listed the same way (changeable only on the Users page).
 function FolderShareDialog({ folder, me, onClose, onLeft }) {
     const [data, setData] = useState(null)
     const [email, setEmail] = useState("")
@@ -125,7 +126,9 @@ function FolderShareDialog({ folder, me, onClose, onLeft }) {
                                 </span>
                                 {m.inherited_from ? (
                                     <span className="truncate text-xs text-tiilt-muted">
-                                        From “{m.inherited_from.name}”
+                                        {m.inherited_from.role
+                                            ? `${cap(m.inherited_from.role)} account \u2014 ${m.inherited_from.role === "super" ? "manages" : "can view"} every folder`
+                                            : `From \u201c${m.inherited_from.name}\u201d`}
                                     </span>
                                 ) : null}
                             </span>

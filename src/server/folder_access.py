@@ -38,13 +38,18 @@ def higher(a, b):
     return a if _RANK.get(a, 0) >= _RANK.get(b, 0) else b
 
 
-def _role_floor(user):
-    role = user.get('role', 'user')
+def role_level(role):
+    """The level an account role carries in every folder by itself: supers
+    manage everywhere, admins read everywhere, ordinary users nothing."""
     if role == 'super':
         return MANAGER
     if role == 'admin':
         return VIEWER
     return None
+
+
+def _role_floor(user):
+    return role_level(user.get('role', 'user'))
 
 
 def effective_level(folder_id, user, get_folder, member_levels):

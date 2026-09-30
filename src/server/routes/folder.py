@@ -98,9 +98,10 @@ def delete_folder(folder_id, **kwargs):
 # -------------------------
 
 def _members_json(folder, user, level):
-    # Direct grants on this folder, plus what flows down from above it: owners
-    # of ancestor folders (managers of everything beneath) and their grants.
-    # One entry per person, at their highest level.
+    # Everyone who can open the folder, one entry per person at their highest
+    # level: direct grants on this folder, what flows down from above it
+    # (owners of ancestor folders manage everything beneath, plus their
+    # grants), and accounts whose role alone reaches every folder.
     chain = database.get_folder_ancestors(folder.id)
     emails = database.get_user_emails()
     by_folder = {}
@@ -123,10 +124,21 @@ def _members_json(folder, user, level):
             offer(f.owner_id, emails.get(f.owner_id), folder_access.MANAGER, source)
         for member, email in by_folder.get(f.id, []):
             offer(member.user_id, email, member.level, source)
+    # Access that comes with an account role rather than a grant: admins read
+    # every folder and supers manage every folder. Marked by role, since only
+    # the Users page can change it; a higher direct grant still wins.
+    for account in database.get_users(roles=['admin', 'super']):
+        offer(account.id, account.email, folder_access.role_level(account.role), dict(role=account.role))
     people.pop(folder.owner_id, None)
+
+    def order(person):
+        # Inherited from a folder above, then by role, then this folder's own grants.
+        source = person['inherited_from']
+        kind = 0 if source and 'name' in source else 1 if source else 2
+        return (kind, person['email'] or '')
     return dict(
         owner=dict(user_id=folder.owner_id, email=emails.get(folder.owner_id)),
-        members=sorted(people.values(), key=lambda p: (p['inherited_from'] is None, p['email'] or '')),
+        members=sorted(people.values(), key=order),
         access=level,
         can_manage_members=folder_access.can_manage_members(level, user),
     )

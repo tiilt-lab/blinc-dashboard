@@ -90,6 +90,14 @@ def test_roles():
     assert level(20, ADMIN, {9: {20: fa.EDITOR}}) == fa.EDITOR
 
 
+def test_role_level_is_what_a_role_alone_reaches():
+    # What the share dialog lists for admins and supers on every folder.
+    assert fa.role_level('super') == fa.MANAGER
+    assert fa.role_level('admin') == fa.VIEWER
+    assert fa.role_level('user') is None
+    assert fa.role_level(None) is None
+
+
 def test_missing_folder_grants_nothing():
     assert level(999, SUPER) is None
     assert level(None, ALICE) is None
