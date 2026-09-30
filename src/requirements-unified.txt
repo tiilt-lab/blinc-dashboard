@@ -95,6 +95,7 @@ greenlet==3.5.3
 groovy==0.1.2
 grpcio==1.81.1
 grpcio-status==1.81.1
+gunicorn==26.2.0
 h11==0.16.0
 hf-xet==1.5.1
 hmmlearn==0.3.3

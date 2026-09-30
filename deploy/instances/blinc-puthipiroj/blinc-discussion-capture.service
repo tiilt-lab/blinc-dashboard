@@ -15,7 +15,15 @@ EnvironmentFile=-/etc/blinc/secrets.env
 Environment="DC_PORT=5001"
 Environment="DC_DEVICE_WS_PORT=9011"
 WorkingDirectory=/home/vlj9405/code/chemistry-dashboard/
-ExecStart=/home/vlj9405/code/chemistry-dashboard/src/venv-unified/bin/python src/server/discussion_capture.py
+# gunicorn gthread, 1 worker x 200 threads (src/server/gunicorn.conf.py). -c is
+# resolved against WorkingDirectory; --chdir src/server puts the server package
+# at sys.path[0] exactly as running discussion_capture.py as a script did.
+# DC_PORT above is read by gunicorn.conf.py (bind=127.0.0.1:$DC_PORT).
+ExecStart=/home/vlj9405/code/chemistry-dashboard/src/venv-unified/bin/gunicorn -c src/server/gunicorn.conf.py --chdir src/server wsgi:app
+# SIGTERM goes to the gunicorn master only, which drains the worker for
+# graceful_timeout=30 s; anything left is SIGKILLed at TimeoutStopSec.
+KillMode=mixed
+TimeoutStopSec=45
 
 [Install]
 WantedBy=multi-user.target
