@@ -25,10 +25,12 @@ socket from ``environ['gunicorn.socket']``, runs the connection inside the
 WSGI call and raises StopIteration when it ends, which gunicorn's gthread
 worker treats as "close this connection". No extra setting is needed.
 
-This module is imported in the WORKER process (the unit does not use
---preload), so ``create_app()``'s side effects run once per worker; with
-``workers = 1`` that is once per service start, and a respawned worker is a
-fresh process that initialises itself again.
+This module is imported in each WORKER process (the unit does not use
+--preload), so ``create_app()`` runs once per worker in the ``api`` role
+(DC_ROLE unset): blueprints and authz only. The device websocket server, the
+scheduler, the post-hoc runner and the boot tasks belong to the coordinator
+process (coordinator.py, blinc-coordinator.service), which is why any number
+of interchangeable workers can serve this app.
 """
 from discussion_capture import create_app
 
