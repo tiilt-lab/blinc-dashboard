@@ -1,0 +1,41 @@
+# Alert routing. Every alert goes to one webhook receiver whose URL comes
+# from ALERT_WEBHOOK_URL in .env (Compose writes it to /etc/alertmanager/
+# webhook_url; Alertmanager reads it with url_file, so the URL is not in
+# git). Email via MailerSend is the intended next receiver: see the README
+# ("Adding a receiver") and the commented block below.
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: webhook
+  group_by: ["alertname", "job"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - matchers:
+        - severity = critical
+      receiver: webhook
+      repeat_interval: 1h
+
+inhibit_rules:
+  # A target that is down explains every other alert from that job.
+  - source_matchers:
+      - alertname = BlincTargetDown
+    target_matchers:
+      - alertname != BlincTargetDown
+    equal: ["job"]
+
+receivers:
+  - name: webhook
+    webhook_configs:
+      - url_file: /etc/alertmanager/webhook_url
+        send_resolved: true
+  # - name: email
+  #   email_configs:
+  #     - to: ops@example.org
+  #       from: alerts@nublinc.com
+  #       smarthost: smtp.mailersend.net:587
+  #       auth_username: <mailersend smtp user>
+  #       auth_password_file: /etc/alertmanager/mailersend_password
+  #       send_resolved: true

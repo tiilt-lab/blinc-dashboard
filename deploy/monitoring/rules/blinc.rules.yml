@@ -1,0 +1,147 @@
+# Alert rules for BLINC. Metric names: deploy/monitoring/README.md.
+groups:
+  - name: blinc-availability
+    rules:
+      - alert: BlincTargetDown
+        expr: up{job!~"dcgm"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }} metrics target is down"
+          description: "Prometheus cannot scrape {{ $labels.instance }} (job {{ $labels.job }}) for 2 minutes: the service or its exporter is not running."
+
+      - alert: PosthocRunnerDead
+        expr: blinc_posthoc_runner_alive == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "post-hoc queue runner thread is not alive"
+          description: "The coordinator's posthoc_queue runner thread has been dead for 5 minutes; queued analyses will not start until blinc-coordinator restarts."
+
+  - name: blinc-host
+    rules:
+      - alert: HostDiskLow
+        expr: node_filesystem_avail_bytes{mountpoint="/", fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{mountpoint="/", fstype!~"tmpfs|overlay"} < 0.15
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "root filesystem under 15% free"
+          description: "{{ $value | humanizePercentage }} of / is free; session creation refuses at 10% (audit Phase 0)."
+
+      - alert: HostMemoryLow
+        expr: node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 0.10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "under 10% of host RAM available"
+          description: "MemAvailable is {{ $value | humanizePercentage }} of MemTotal; the live services will start paging."
+
+      - alert: GpuMemoryHigh
+        expr: blinc_gpu_memory_used_bytes / blinc_gpu_memory_total_bytes > 0.90
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "GPU {{ $labels.gpu }} memory above 90%"
+          description: "{{ $value | humanizePercentage }} of VRAM is used; the next CrisperWhisper spawn or post-hoc model load will fail (3.5 GB free-VRAM check)."
+
+  - name: blinc-live
+    rules:
+      - alert: LivePodWindowBacklog
+        expr: blinc_audio_window_backlog_seconds > 30
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "pod {{ $labels.pod }} captions lag more than 30 s"
+          description: "{{ $value }} s of audio windows are waiting for an ASR worker on pod {{ $labels.pod }}; captions are that far behind (DC_ASR_WORKERS, GPU contention)."
+
+      - alert: AsrPoolDegraded
+        expr: blinc_asr_pool_degraded == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "every CrisperWhisper worker slot is degraded"
+          description: "No ASR worker can serve; live pods are being told asr_status=degraded. Check src/audio_processing/crisper_worker.stderr.log and free VRAM."
+
+      - alert: AsrDegradedPods
+        expr: sum(blinc_audio_asr_degraded) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} live pod(s) have ASR degraded"
+          description: "Pods were last told asr_status=degraded for over a minute (worker restarting, unresponsive or low VRAM)."
+
+      - alert: AudioIngestDropping
+        expr: rate(blinc_audio_chunks_dropped_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "live audio ingest is dropping chunks"
+          description: "The reactor->ASR queue is evicting audio ({{ $value | humanize }} chunks/s over 5 min): the ASR side is not keeping up."
+
+      - alert: CallbackGiveUps
+        expr: increase(blinc_audio_callback_retries_total{outcome="gave_up"}[10m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "transcript/metric callbacks gave up"
+          description: "{{ $value | humanize }} callbacks to the API were abandoned after 10 minutes of retries in the last 10 minutes; those utterances are lost. Is the API up?"
+
+  - name: blinc-api
+    rules:
+      - alert: ApiHigh5xxRate
+        expr: |
+          sum(rate(blinc_http_requests_total{status=~"5.."}[5m]))
+            / sum(rate(blinc_http_requests_total[5m])) > 0.05
+          and sum(rate(blinc_http_requests_total[5m])) > 0.2
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "API 5xx rate above 5%"
+          description: "{{ $value | humanizePercentage }} of API responses were 5xx over the last 5 minutes."
+
+      - alert: ApiDbPoolNearExhaustion
+        expr: sum(blinc_db_pool_connections{state="checked_out"}) > 40
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SQLAlchemy pool nearly exhausted"
+          description: "{{ $value }} connections checked out across the API workers (pool 20 + 30 overflow per worker); requests will start timing out at 10 s."
+
+  - name: blinc-posthoc
+    rules:
+      - alert: PosthocRunFailed
+        expr: increase(blinc_posthoc_runs_total{outcome="failed"}[1h]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "post-hoc run failed ({{ $labels.job }})"
+          description: "{{ $value | humanize }} post-hoc run(s) on {{ $labels.job }} ended in failure in the last hour (ASR crash, CUDA OOM, timeout)."
+
+      - alert: PosthocFailedKeysPresent
+        expr: blinc_posthoc_failed_keys > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} pod(s) have a recorded post-hoc failure"
+          description: "posthoc_failed:* keys are set (1 h TTL); the reason is in the key and the coordinator log."
+
+      - alert: PosthocQueueBacklog
+        expr: blinc_posthoc_queue_jobs{state="queued"} > 10
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "post-hoc queue has had more than 10 jobs for an hour"
+          description: "{{ $value }} jobs queued; the runner may be waiting out a live class or stuck on a leg."

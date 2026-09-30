@@ -1,0 +1,109 @@
+# BLINC monitoring stack: Prometheus + Alertmanager + Grafana + node_exporter.
+#
+# Every container uses the host network so Prometheus can scrape the BLINC
+# exporters, which bind 127.0.0.1 only, and every listener is pinned to
+# 127.0.0.1 by its own flag/env (no port is published on the box's addresses;
+# Grafana on 127.0.0.1:3000 is reached over the tailnet or an ssh tunnel).
+# The GPU exporter is a systemd unit (blinc-gpu-exporter.service, NVML on
+# 127.0.0.1:9115); dcgm-exporter is available behind `--profile dcgm` and
+# needs the nvidia container runtime (registered in /etc/docker/daemon.json).
+#
+#   cd deploy/monitoring && cp .env.example .env   # webhook URL, Grafana password
+#   docker compose config                          # validate
+#   docker compose up -d                           # start
+#
+name: blinc-monitoring
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    container_name: blinc-prometheus
+    network_mode: host
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+      - --web.listen-address=127.0.0.1:9090
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    container_name: blinc-alertmanager
+    network_mode: host
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+      - --web.listen-address=127.0.0.1:9093
+      - --cluster.listen-address=
+    configs:
+      - source: webhook_url
+        target: /etc/alertmanager/webhook_url
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+
+  grafana:
+    image: grafana/grafana:12.1.0
+    container_name: blinc-grafana
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      GF_SERVER_HTTP_ADDR: 127.0.0.1
+      GF_SERVER_HTTP_PORT: "3000"
+      GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL:-http://127.0.0.1:3000/}
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+
+  node-exporter:
+    image: prom/node-exporter:v1.9.1
+    container_name: blinc-node-exporter
+    network_mode: host
+    pid: host
+    restart: unless-stopped
+    command:
+      - --path.rootfs=/host
+      - --web.listen-address=127.0.0.1:9100
+      - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc|run|var/lib/docker)($$|/)
+    volumes:
+      - /:/host:ro,rslave
+
+  # Optional: NVIDIA's DCGM exporter instead of (or beside) the NVML unit.
+  # Not verified on this host (containers were not started while building the
+  # stack); needs the nvidia runtime. Scraped as job "dcgm" when running.
+  dcgm-exporter:
+    image: nvcr.io/nvidia/k8s/dcgm-exporter:4.2.3-4.1.3-ubuntu22.04
+    container_name: blinc-dcgm-exporter
+    profiles: ["dcgm"]
+    network_mode: host
+    restart: unless-stopped
+    runtime: nvidia
+    cap_add:
+      - SYS_ADMIN
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+    command: ["-a", "127.0.0.1:9400"]
+
+configs:
+  # Alertmanager reads the webhook URL from a file (url_file); Compose writes
+  # it from the ALERT_WEBHOOK_URL variable (.env) so the URL never sits in git.
+  webhook_url:
+    content: "${ALERT_WEBHOOK_URL:-http://127.0.0.1:9/alert-webhook-not-configured}"
+
+volumes:
+  prometheus-data:
+  alertmanager-data:
+  grafana-data:

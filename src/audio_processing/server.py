@@ -32,6 +32,7 @@ from enrollment_token import enrollment_allows
 import live_presence  # live_pod:<key> keys the post-hoc services defer to (src/common)
 from audio_buffer import AudioBuffer
 import asr_ingest  # reactor-side ingest bookkeeping (stamped chunks, drop counter)
+import live_metrics  # Prometheus exporter accessors (src/common/blinc_metrics)
 import segment_pool  # process-wide bounded utterance pool; drained at exit
 from ecapa_device import load_ecapa
 from processor import AudioProcessor
@@ -89,6 +90,8 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
         self._fingerprint_lock = threading.Lock()
         # LoopingCall refreshing this pod's live_pod:<key> presence.
         self._presence = None
+        # Last asr_status state sent to this pod (read by live_metrics).
+        self.asr_state = 'ok'
 
         logging.info('Loaded Diarization Model and Semantic Model...')
 
@@ -486,6 +489,7 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
 
     def _send_asr_status(self, state, message=None):
         # Browser contract: {"type": "asr_status", "state": "ok"|"degraded", "message"?: str}
+        self.asr_state = state
         status = {'type': 'asr_status', 'state': state}
         if message:
             status['message'] = message
@@ -496,6 +500,7 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
             return
         self.end_signaled = True
         self._stop_presence()
+        live_metrics.retire(self._ingest)  # keep the exported ingest totals monotonic
         if self.asr:
             self.asr.stop()
         if self.processor:
@@ -568,6 +573,8 @@ if __name__ == '__main__':
     factory.protocol = ServerProtocol
 
     reactor.listenTCP(int(os.environ.get('DC_AUDIO_WS_PORT', 9000)), factory)
+    # Prometheus exporter (loopback, BLINC_METRICS_PORT, default 9111).
+    live_metrics.install(cm, retry_queue=getattr(callbacks, '_RETRIES', None))
     logging.info('Audio Processing Service started.')
     reactor.run()
     # Non-daemon pool threads: cancel queued utterances so a backlog can't

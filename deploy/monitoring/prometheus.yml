@@ -1,0 +1,67 @@
+# Scrape targets for BLINC (all on the host's loopback; the compose stack runs
+# on the host network). Exporter ports: src/common/blinc_metrics.DEFAULT_PORTS.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    site: nublinc
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["127.0.0.1:9093"]
+
+scrape_configs:
+  # gunicorn API workers: /metrics on the API port itself (multiprocess merge).
+  - job_name: api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["127.0.0.1:5001"]
+
+  # coordinator: device websocket server, scheduler, post-hoc queue runner.
+  - job_name: coordinator
+    static_configs:
+      - targets: ["127.0.0.1:9110"]
+
+  # live audio server (ingest, ASR pool, callback retries, caption-lag proxy).
+  - job_name: audio
+    static_configs:
+      - targets: ["127.0.0.1:9111"]
+
+  # live video server (exporter owned by the video workstream; see README).
+  - job_name: video
+    static_configs:
+      - targets: ["127.0.0.1:9112"]
+
+  - job_name: audio-posthoc
+    static_configs:
+      - targets: ["127.0.0.1:9113"]
+
+  - job_name: video-posthoc
+    static_configs:
+      - targets: ["127.0.0.1:9114"]
+
+  # NVML exporter (deploy/monitoring/gpu_exporter.py, blinc-gpu-exporter.service).
+  - job_name: gpu
+    static_configs:
+      - targets: ["127.0.0.1:9115"]
+
+  - job_name: node
+    static_configs:
+      - targets: ["127.0.0.1:9100"]
+
+  # Optional dcgm-exporter (compose profile "dcgm"); down until started.
+  - job_name: dcgm
+    static_configs:
+      - targets: ["127.0.0.1:9400"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["127.0.0.1:9090"]
+
+  - job_name: alertmanager
+    static_configs:
+      - targets: ["127.0.0.1:9093"]

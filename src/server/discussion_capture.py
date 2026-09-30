@@ -57,6 +57,7 @@ from routes.llm_query import api_routes as llm_api
 from routes.health import api_routes as health_api
 from routes.data_quality import api_routes as data_quality_api
 from routes.posthoc_ticket import api_routes as posthoc_ticket_api
+from routes.metrics import api_routes as metrics_api
 
 # Side-effect import: routes/socket.py registers the /session socketio event
 # handlers via @socketio.on decorators AT IMPORT TIME, and is referenced by no
@@ -105,6 +106,7 @@ def _register_blueprints():
     app.register_blueprint(health_api)
     app.register_blueprint(data_quality_api)
     app.register_blueprint(posthoc_ticket_api)
+    app.register_blueprint(metrics_api)
 
 
 def _configure_authz():

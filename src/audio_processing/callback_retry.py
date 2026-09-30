@@ -68,6 +68,12 @@ class RetryQueue:
         with self._cv:
             return len(self._entries)
 
+    def stats(self):
+        """Queue depth and lifetime outcome totals (for the metrics exporter)."""
+        with self._cv:
+            return {"size": len(self._entries), "delivered": self.delivered,
+                    "gave_up": self.gave_up, "dropped": self.dropped}
+
     def delay_for(self, attempts):
         return min(self.max_delay, self.base_delay * (2 ** attempts))
 

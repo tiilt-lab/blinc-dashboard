@@ -1,0 +1,18 @@
+[Unit]
+Description=BLINC GPU exporter (NVML -> Prometheus on 127.0.0.1:9115)
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+User=vlj9405
+Group=www-data
+Type=simple
+Restart=always
+RestartSec=5
+Environment="BLINC_METRICS_PORT=9115"
+WorkingDirectory=/home/vlj9405/code/chemistry-dashboard
+ExecStart=/home/vlj9405/code/chemistry-dashboard/src/venv-unified/bin/python deploy/monitoring/gpu_exporter.py
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

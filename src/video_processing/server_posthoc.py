@@ -79,6 +79,38 @@ _TICKETED_TYPES = frozenset((
 ))
 _running_guard = threading.Lock()  # kept for snapshot-then-mutate sections
 
+# Prometheus (src/common/blinc_metrics; exporter started in __main__, loopback
+# BLINC_METRICS_PORT, default 9114). Same names as the audio post-hoc server;
+# Prometheus' job label tells them apart.
+import blinc_metrics as bm
+from gpu_lease import PREEMPTED
+_M_RUNS = bm.counter('posthoc_runs_total', 'Post-hoc runs finished, by outcome', ('outcome',))
+_M_CLAIMS = bm.counter('posthoc_claims_total', 'Pod claims attempted, by result', ('result',))
+_M_GPU_BUSY = bm.counter('posthoc_gpu_busy_total', 'Runs refused because a class is live or the GPU lease is held')
+
+
+def _claim(key):
+    ok = running_video_processes.try_claim(key)
+    _M_CLAIMS.labels('ok' if ok else 'busy').inc()
+    return ok
+
+
+def _run_outcome(success, reason):
+    if success:
+        return 'ok'
+    return 'preempted' if reason == PREEMPTED else 'failed'
+
+
+def install_metrics():
+    bm.install_process_metrics('video_posthoc')
+    bm.callback_gauge('posthoc_runs_in_progress', 'Post-hoc runs active in this process',
+                      lambda: len(running_video_processes))
+    bm.callback_gauge('posthoc_lease_held', 'Connections in this process holding the GPU lease',
+                      lambda: sum(1 for c in list(cm.connections) if getattr(c, '_gpu_lease', None) is not None))
+    bm.callback_gauge('posthoc_connections', 'Open websocket connections on the post-hoc server',
+                      lambda: cm.get_number_of_connections())
+    return bm.start_exporter(bm.port_for('video_posthoc'))
+
 # Exit once the analysis queue drains (and systemd restarts us fresh):
 # glibc never returns the per-run allocation churn to the OS, so RSS only
 # resets with a new process. Armed from on_run_complete when the last run
@@ -253,7 +285,7 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
 
                 #keep track of currently running posthoc video analytics
                 # Atomic cross-process claim; registry.pop releases it.
-                if not running_video_processes.try_claim(key):
+                if not _claim(key):
                     self.send_json({'type': 'error', 'message': 'Video posthoc analytics for this group is already running'})
                     return
 
@@ -272,6 +304,7 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
                     self._gpu_lease = acquire_for_run(
                         redis_client._redis(), owner='video-posthoc:%d:%s' % (os.getpid(), key))
                     if self._gpu_lease is None:
+                        _M_GPU_BUSY.inc()
                         running_video_processes.pop(key, None)
                         self.send_json(dict(GPU_BUSY_REPLY))
                         return
@@ -480,6 +513,7 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
         # complete server-side on success (survives a disconnected client) or
         # reports posthoc_failed; releases the claim + GPU lease.
         self._run_active = False
+        _M_RUNS.labels(_run_outcome(success, reason)).inc()
         # Per-pod CUDA cleanup: batch runs grew this process ~1.5 GiB per pod
         # until whisperx in the AUDIO service could no longer load (shared
         # card) - same class of leak fixed in whisperx_asr. Runs BEFORE the
@@ -573,6 +607,7 @@ if __name__ == '__main__':
     factory.protocol = ServerProtocol
     # Loopback only: nginx and the API's queue connect via 127.0.0.1.
     reactor.listenTCP(int(os.environ.get("DC_VIDEO_POSTHOC_WS_PORT", 9004)), factory, interface='127.0.0.1')
+    install_metrics()
     logging.info('Video Posthoc Processing Service started.')
     reactor.run()
     logging.info('Video Posthoc Processing Service ended.')

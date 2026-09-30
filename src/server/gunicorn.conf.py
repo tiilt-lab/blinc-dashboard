@@ -75,3 +75,40 @@ max_requests_jitter = 0
 
 # Shows up in ps/pgrep as the service, not as "gunicorn: worker [wsgi:app]".
 proc_name = 'blinc-discussion-capture'
+
+# --- Prometheus multiprocess bookkeeping (src/server/routes/metrics.py) ------
+#
+# The workers share one listening socket, so /metrics is served by whichever
+# worker takes the scrape; prometheus_client's multiprocess mode keeps every
+# worker's counters in mmap files under PROMETHEUS_MULTIPROC_DIR and the
+# answering worker merges them. The directory must be private to this master
+# (a second instance beside production uses another DC_PORT) and empty at
+# start (pids get reused), and a dead worker's live gauges must be dropped.
+# Both hooks run in the master; on_starting runs before the first fork, so
+# the workers inherit the variable before they import prometheus_client.
+# Set at hook time, not at import: this file is also exec'd by the tests.
+
+def _multiproc_dir():
+    return os.environ.get('PROMETHEUS_MULTIPROC_DIR') or os.path.join(
+        '/dev/shm', 'blinc-prometheus-%s' % os.environ.get('DC_PORT', '5000'))
+
+
+def on_starting(server):
+    path = _multiproc_dir()
+    os.environ['PROMETHEUS_MULTIPROC_DIR'] = path
+    os.makedirs(path, exist_ok=True)
+    for name in os.listdir(path):
+        try:
+            os.remove(os.path.join(path, name))
+        except OSError:
+            pass
+
+
+def child_exit(server, worker):
+    try:
+        # Loaded lazily by name: this module stays stdlib-only at import
+        # (tests exec it without prometheus_client on the path).
+        multiprocess = __import__('prometheus_client.multiprocess', fromlist=['mark_process_dead'])
+        multiprocess.mark_process_dead(worker.pid, _multiproc_dir())
+    except Exception as e:  # never let bookkeeping take the arbiter down
+        server.log.warning('prometheus mark_process_dead(%s) failed: %s', worker.pid, e)

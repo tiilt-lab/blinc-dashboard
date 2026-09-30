@@ -87,6 +87,38 @@ _TICKETED_TYPES = frozenset((
 # registry is internally locked, so single ops don't need it.
 _running_guard = threading.Lock()
 
+# Prometheus (src/common/blinc_metrics; exporter started in __main__, loopback
+# BLINC_METRICS_PORT, default 9113). Counters increment where the events
+# already happen; gauges read the registry and the connection manager.
+import blinc_metrics as bm
+_M_RUNS = bm.counter('posthoc_runs_total', 'Post-hoc runs finished, by outcome', ('outcome',))
+_M_CLAIMS = bm.counter('posthoc_claims_total', 'Pod claims attempted, by result', ('result',))
+_M_GPU_BUSY = bm.counter('posthoc_gpu_busy_total', 'Runs refused because a class is live or the GPU lease is held')
+_M_FRAGMENT_JOINS = bm.counter('posthoc_fragment_joins_total', 'Recording fragment joins, by result', ('result',))
+
+
+def _claim(key):
+    ok = running_audio_processes.try_claim(key)
+    _M_CLAIMS.labels('ok' if ok else 'busy').inc()
+    return ok
+
+
+def _run_outcome(success, watch):
+    if success:
+        return 'ok'
+    return 'preempted' if getattr(watch, 'preempted', False) else 'failed'
+
+
+def install_metrics():
+    bm.install_process_metrics('audio_posthoc')
+    bm.callback_gauge('posthoc_runs_in_progress', 'Post-hoc runs active in this process',
+                      lambda: len(running_audio_processes))
+    bm.callback_gauge('posthoc_lease_held', 'Connections in this process holding the GPU lease',
+                      lambda: sum(1 for c in list(cm.connections) if getattr(c, '_gpu_lease', None) is not None))
+    bm.callback_gauge('posthoc_connections', 'Open websocket connections on the post-hoc server',
+                      lambda: cm.get_number_of_connections())
+    return bm.start_exporter(bm.port_for('audio_posthoc'))
+
 class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
 
     def __init__(self, *args, **kwargs):
@@ -193,7 +225,7 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
                  #keep track of currently running posthoc audio analytics
                 # Atomic cross-process claim; False if a run for this pod is
                 # already active anywhere. registry.pop(...) later releases it.
-                if not running_audio_processes.try_claim(key):
+                if not _claim(key):
                     self.send_json({'type': 'error', 'message': 'Audio posthoc analytics for this group is already running'})
                     return
 
@@ -243,6 +275,7 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
                             self.speakers[speaker["id"]] = {"alias": speaker["alias"], "data": byte_audio_data}
 
                         if not self.signal_start():
+                            _M_GPU_BUSY.inc()
                             # GPU busy (live class / another run): defer and
                             # do nothing else; the queue re-enqueues on the code.
                             running_audio_processes.pop(key, None)
@@ -282,7 +315,7 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
                 off_set_date = "Sat Jun 27 18:17:13 2026" #this is just a generic date
 
                 #keep track of currently running posthoc audio analytics
-            if not running_audio_processes.try_claim(key):
+            if not _claim(key):
                 self.send_json({'type': 'error', 'message': 'Audio posthoc analytics for this group is already running'})
                 return
 
@@ -325,7 +358,7 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
                 key, off_set_date = parse_recording_filename(self.audio_file)
  
                  #keep track of currently running posthoc audio analytics
-                if not running_audio_processes.try_claim(key):
+                if not _claim(key):
                     self.send_json({'type': 'error', 'message': 'Audio posthoc analytics for this group is already running'})
                     return
 
@@ -435,7 +468,9 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
             logging.info("Joining %d recording fragments for %s -> %s", len(to_join), prefix, chosen)
             try:
                 recording_fragments.join_fragments(to_join, chosen)
+                _M_FRAGMENT_JOINS.labels('ok').inc()
             except Exception as e:
+                _M_FRAGMENT_JOINS.labels('failed').inc()
                 logging.warning("fragment join failed for %s (%s); using the first fragment", prefix, e)
                 chosen = to_join[0]
         logging.info("Found: {0}".format(chosen))
@@ -597,6 +632,7 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
         # server-side on success (survives a disconnected client), releases
         # the claim + GPU lease, and detaches from the connection manager.
         self._run_active = False
+        _M_RUNS.labels(_run_outcome(success, self._preempt_watch)).inc()
         try:
             if self.config:
                 running_audio_processes.pop(self.config.auth_key, None)
@@ -671,6 +707,7 @@ if __name__ == '__main__':
     factory.protocol = ServerProtocol
     # Loopback only: nginx and the API's queue connect via 127.0.0.1.
     reactor.listenTCP(int(os.environ.get("DC_AUDIO_POSTHOC_WS_PORT", 9005)), factory, interface='127.0.0.1')
+    install_metrics()
     logging.info('Audio Posthoc Processing Service started.')
     # Claims left by a previous process of this service that died mid-run
     # would block those pods for the 3 h TTL (audit C.4).
