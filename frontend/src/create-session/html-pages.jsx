@@ -137,6 +137,33 @@ function CreateSessionPage(props) {
                   </span>
                 </label>
               </div>
+              <div>
+                <label className={fieldLabel}>Negotiation coding</label>
+                <label
+                  htmlFor="chkNegotiationCoding"
+                  className="flex cursor-pointer items-start gap-3 rounded-lg border border-tiilt-line bg-white px-3 py-2.5"
+                >
+                  <input
+                    id="chkNegotiationCoding"
+                    type="checkbox"
+                    className="mt-0.5 h-4 w-4 flex-none cursor-pointer accent-tiilt"
+                    checked={props.negotiationCoding === true}
+                    onChange={(event) =>
+                      props.setNegotiationCoding(event.target.checked)
+                    }
+                  />
+                  <span>
+                    <span className="block text-sm font-semibold text-tiilt-ink">
+                      Negotiation coding (Viking case: code utterances per team after each pod finishes)
+                    </span>
+                    <span className="block text-xs text-tiilt-muted">
+                      A local model codes each utterance for emotion,
+                      interests/rights/power, frame and listening moves, rolled
+                      up per team (Pat vs Sandy) on the pod page.
+                    </span>
+                  </span>
+                </label>
+              </div>
             </div>
             <div className={footerBar}>
               <div className={footerRow}>

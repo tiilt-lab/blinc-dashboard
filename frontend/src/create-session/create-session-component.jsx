@@ -63,6 +63,12 @@ function CreateSessionComponent(props) {
   const [liveVideoAnalytics, setLiveVideoAnalytics] = useState(
     changedState && prevState.liveVideoAnalytics != null ? prevState.liveVideoAnalytics !== false : true
   );
+  // Negotiation coding (Kellogg Viking case): after each pod finishes, a local
+  // LLM codes every utterance per team. Off by default so other classes never
+  // see the panel.
+  const [negotiationCoding, setNegotiationCoding] = useState(
+    changedState && prevState.negotiationCoding != null ? prevState.negotiationCoding === true : false
+  );
   const [selectedKeywordList] = useState(changedState ? prevState.selectedKeywordList : null);
   const [selectedTopicModel] = useState(changedState ? prevState.selectedTopicModel : null);
   const [selectedDevices, setSelectedDevices] = useState([]);
@@ -174,7 +180,7 @@ function CreateSessionComponent(props) {
       const deviceIds = selectedDevices.map(d => d.id);
       const keywordListId = (selectedKeywordList) ? selectedKeywordList.id : null;
       const topicModelId = (selectedTopicModel) ? selectedTopicModel.id : null;
-      const fetchData = new SessionService().createNewSession(finalName, deviceIds, keywordListId, topicModelId, byod, features, doa, folder, asr, liveVideoAnalytics)
+      const fetchData = new SessionService().createNewSession(finalName, deviceIds, keywordListId, topicModelId, byod, features, doa, folder, asr, liveVideoAnalytics, negotiationCoding)
       fetchData.then(
         response=>{
           if(response.status === 200){
@@ -305,6 +311,8 @@ function CreateSessionComponent(props) {
     setAsr = {setAsr}
     liveVideoAnalytics = {liveVideoAnalytics}
     setLiveVideoAnalytics = {setLiveVideoAnalytics}
+    negotiationCoding = {negotiationCoding}
+    setNegotiationCoding = {setNegotiationCoding}
     goToSettings = {goToSettings}
     goToDevices = {goToDevices}
     devices = {devices}

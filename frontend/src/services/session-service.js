@@ -310,7 +310,8 @@ class SessionService {
     doa,
     folder,
     asr,
-    liveVideoAnalytics
+    liveVideoAnalytics,
+    negotiationCoding
   ) {
     const body = {
       name: name,
@@ -325,6 +326,8 @@ class SessionService {
       asr: asr || null,
       // false = record video now, analyse after class (default: analyse live)
       liveVideoAnalytics: liveVideoAnalytics !== false,
+      // true = negotiation class: code each pod's utterances per team after it ends
+      negotiationCoding: negotiationCoding === true,
     };
 
     return this.api.httpRequestCall("api/v1/sessions", "POST", body);

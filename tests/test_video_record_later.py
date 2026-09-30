@@ -303,7 +303,7 @@ def test_video_server_folds_the_session_flag_into_the_record_only_branch():
 def test_create_session_ui_sends_the_flag_and_defaults_it_on():
     comp = _read("frontend", "src", "create-session", "create-session-component.jsx")
     assert "const [liveVideoAnalytics, setLiveVideoAnalytics] = useState(" in comp
-    assert "folder, asr, liveVideoAnalytics)" in comp
+    assert "folder, asr, liveVideoAnalytics" in comp  # further flags may follow (negotiationCoding)
     page = _read("frontend", "src", "create-session", "html-pages.jsx")
     assert "Analyse video live (uses the GPU during class; off = record now, analyse after class)" in page
     assert 'checked={props.liveVideoAnalytics !== false}' in page
