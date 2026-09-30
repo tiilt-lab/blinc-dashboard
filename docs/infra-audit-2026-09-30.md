@@ -35,6 +35,21 @@ Live on nublinc.com after migration f8ae4e72c79c, a restart of all five units an
 
 Still open from the audit: Phase 2 (WSGI server, GPU lease, post-hoc correctness/cancel, migration reconciliation), the resolution/fps follow-up at the video ffmpeg spawn, fragment-aware post-hoc recording lookup (172 pods have fragments), `VideoProcessor.stop()` join on the reactor, co-tenants.
 
+## STATUS — Phase 2 and the scaling items applied 2026-09-30 (commits 0327ba4..871492a)
+
+Live on nublinc.com after migrations 1f2e3d4c5b6a, 2a3b4c5d6e7f, 3b4c5d6e7f80, new units and a restart of everything:
+
+- 13. API serves under gunicorn: 3 gthread workers x 64 threads (`DC_API_WORKERS`), `/etc/systemd/.../blinc-discussion-capture.service.d/override.conf` overrides ExecStart. A new `blinc-coordinator.service` runs the device websocket server (9011), the scheduler, the post-hoc queue runner and the boot tasks; device commands travel over Redis pub/sub; watchers, connect times, LLM slots, remux/synthesis locks and the image queue are Redis-backed. Socket.IO is websocket-only on both ends (open browser tabs from before the deploy must reload once).
+- 14. Live presence keys (`live_pod:*`) gate post-hoc work; single-slot GPU lease (`gpu_lease:0`, 3 min TTL, heartbeat); a running post-hoc job is pre-empted when a class starts and re-queued; speaker embeddings on CUDA when >= 1.5 GB free; per-segment work through a 4-thread pool; batched ECAPA windows.
+- 15. Post-hoc results are staged and replace the old ones only on success; `posthoc_failed` callback; worker process groups killed on cancel/pre-emption/timeout; claims store pid:boot-id with heartbeats and stale cleanup; recordings split by reconnects are joined in order; status-probe connection leak fixed.
+- 16. Migration chain rebuilds production exactly; ON DELETE rules on the session/user/folder graphs; delete_* are single statements; account tokens purged after 30 days; CI job builds the chain against MySQL 8.
+- Scaling 1-2. Silero VAD skips silent ASR windows (`DC_ASR_VAD`), a pool of 2 lazily spawned CrisperWhisper workers (`DC_ASR_WORKERS`), batch-capable worker protocol (no real batch API in crisperwhisper 2.0.3), `DC_ASR_MODEL` knob.
+- Scaling 3. Metrics on loopback from every service (API /metrics, 9110-9115), Prometheus/Grafana/Alertmanager via `deploy/monitoring/docker-compose.yml` (127.0.0.1:9090 / :3000 / :9093; Grafana admin password in deploy/monitoring/.env), NVML GPU exporter unit, 15 alert rules with a webhook receiver still to be pointed somewhere.
+- Scaling 4. Per-session `live_video_analytics` (create dialog checkbox; off = record only, video post-hoc leg queued at session end); live video decode on NVDEC with software fallback; video exporter on 9112.
+- Tooling: `tools/loadgen` (see README) with a dedicated `loadgen@nublinc.com` teacher account (credentials in ~/.config/blinc-loadgen.env).
+
+Not done: anonymous student-read routes (product decision; rate-limited), co-tenants (parked), video post-hoc results are still wiped at run start, multi-host split.
+
 Earlier reports this builds on: `server-load-report-2026-08-06.md` (disk and ffmpeg-fan-out warnings, still open) and `docs/codebase-sweep.md` (P1/P2 antipatterns, fixed 2026-08-09).
 
 ---
