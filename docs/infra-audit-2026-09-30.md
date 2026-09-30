@@ -19,6 +19,22 @@ Applied and verified on the host, no code beyond commit `1381557`:
 
 Not done, needs a decision: the co-tenants. `llama-server` (26.5 GB VRAM, 10 GB swap, started by hand from `~/src/llama.cpp-pr27210`) and `mongod` (8.4 GB RSS) are why BLINC processes sit in swap. Phases 1 and 2 are untouched.
 
+## STATUS — Phase 1 applied 2026-09-30 (same day, commits ce0cd21..3438b59)
+
+Live on nublinc.com after migration f8ae4e72c79c, a restart of all five units and a frontend rebuild:
+
+- 7a. Post-hoc websockets require a per-pod ticket from `POST /api/v1/sessions/<sid>/devices/<did>/posthoc_ticket` (session write access; Redis `posthoc_ticket:*`, 15 min); both services bind 127.0.0.1. Verified: unticketed and bogus-ticket messages are refused through nginx.
+- 7b. Biometric enrollment requires a token minted by `addstudent` (Redis `enroll_token:*`, 30 min, bound to the alias) on both the live audio and post-hoc video sockets.
+- 7c. NOT changed (product decision): the anonymous student-read routes are rate-limited per IP only.
+- 8. Video key check keeps pods on API errors (closes only on explicit 4xx, or after 10 min of continuous failure); BYOD reconnects with jitter for 3 min keeping mic/camera alive and replaying up to ~3 min of offline audio; video socket reconnects; `/me` denies only on 401/403.
+- 9. Transcript / metric / connect / disconnect callbacks retry (1 s -> 60 s, 10 min) with `X-Idempotency-Key`; ingest is idempotent on natural keys and batched.
+- 10. ASR ingest is non-blocking with absolute-sample timestamps and drop counters; CrisperWhisper spawns go through a 30-300 s breaker with a 3.5 GB free-VRAM check; worker stderr in src/audio_processing/crisper_worker.stderr.log; pods receive `asr_status`; optional stages no longer drop transcripts.
+- 11. `?after_id=` on the three polled routes (+ authenticated twin); `join_room` delta replay; websocket-first Socket.IO; chained/paused polling.
+- 12. Indexes: UNIQUE session_device.processing_key, UNIQUE user.email, transcript.speaker_id, session.passcode, session(owner_id, creation_date); EXISTS rewrite for the admin sessions list.
+- Also: video frame batches bounded to 2 per pod (oldest dropped, counted); autoPing 10/20 s on both live factories; recording-filename parsing fixed for post-hoc callbacks.
+
+Still open from the audit: Phase 2 (WSGI server, GPU lease, post-hoc correctness/cancel, migration reconciliation), the resolution/fps follow-up at the video ffmpeg spawn, fragment-aware post-hoc recording lookup (172 pods have fragments), `VideoProcessor.stop()` join on the reactor, co-tenants.
+
 Earlier reports this builds on: `server-load-report-2026-08-06.md` (disk and ffmpeg-fan-out warnings, still open) and `docs/codebase-sweep.md` (P1/P2 antipatterns, fixed 2026-08-09).
 
 ---
