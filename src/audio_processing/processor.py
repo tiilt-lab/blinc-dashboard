@@ -60,6 +60,8 @@ class AudioProcessor:
         self.topic_model = None
         self.fingerprints = None
         self.cohesion_window = 20
+        # Stages that already logged a traceback this session (see _optional).
+        self._stage_failures = set()
 
         self.semantic_model = semantic_model
         logging.info("Start metrics process")
@@ -190,62 +192,82 @@ class AudioProcessor:
         logging.info('Processing thread stopped for {0}.'.format(
             self.config.auth_key))
 
+    def _optional(self, stage, fn, default=None):
+        # Enrichment stages are optional: one failing (a CUDA OOM in keyword
+        # embedding, say) used to take the whole utterance with it because
+        # everything shared one try. Log, skip, and post the transcript
+        # anyway. Traceback once per stage per session; later repeats are a
+        # single line so a persistently broken stage can't flood the log.
+        try:
+            return fn()
+        except Exception as e:
+            first = stage not in self._stage_failures
+            self._stage_failures.add(stage)
+            logging.warning('%s stage failed for %s (%s); transcript continues without it',
+                            stage, self.config.auth_key, e, exc_info=first)
+            return default
+
+    def _enrich(self, text):
+        """Questions / keywords / features for one transcript row, each optional."""
+        questions = keywords = features = None
+        if self.config.transcribe:
+            questions = self._optional('questions', lambda: features_detector.detect_questions(text))
+        if self.config.keywords:
+            keywords = self._optional('keywords', lambda: keyword_detector.detect_keywords(text, self.config.keywords))
+        if self.config.features:
+            features = self._optional('features', lambda: scorer_factory.get_scorer(cf.scorer()).detect_features(text))
+        return questions, keywords, features
+
+    def _topic_id(self, transcript_text, default=-1):
+        logging.info("Text for topic modeling")
+        logging.info(transcript_text)
+        preprocessed = preprocess_transcript(transcript_text, [""])
+        logging.info("Preprocessed")
+        logging.info(preprocessed)
+        logging.info(self.topic_model.id2word)
+        text2bow = self.topic_model.id2word.doc2bow(preprocessed)
+        logging.info("Corpus")
+        logging.info(text2bow)
+        topic_id = default
+        if len(text2bow):
+            topics = self.topic_model[text2bow]
+            logging.info("Topics distribution: ")
+            logging.info(topics)
+            #    topics = get_topics_with_prob(transcript_text)
+            # Shared argmax (processing_common) — was duplicated and
+            # drifting between the live and posthoc processors.
+            topic_id = select_topic_id(topics, default=topic_id)
+        logging.info(topic_id)
+        return topic_id
+
     # Processes a transcript and its related audio data.
     def process_transcript(self, transcript_data, audio_data, start_time, end_time):
         try:
             processing_timer = time.time()
             words = transcript_data.alternatives[0].words
-            # Get Transcripts and Questions
+            # Get Transcript, Questions, Keywords and Features.
             transcript_text = None
-            questions = None
             if self.config.transcribe:
                 transcript_text = transcript_data.alternatives[0].transcript
-                questions = features_detector.detect_questions(transcript_text)
-
-            # Get Keywords.
-            keywords = None
-            if self.config.keywords:
-                keywords = keyword_detector.detect_keywords(
-                    transcript_text, self.config.keywords)
+            questions, keywords, features = self._enrich(transcript_text)
 
             # Get Topics
-            topics = None
             topic_id = -1
             if self.topic_model:
-                logging.info("Text for topic modeling")
-                logging.info(transcript_text)
-                preprocessed = preprocess_transcript(transcript_text, [""])
-                logging.info("Preprocessed")
-                logging.info(preprocessed)
-                logging.info(self.topic_model.id2word)
-                text2bow = self.topic_model.id2word.doc2bow(preprocessed)
-                logging.info("Corpus")
-                logging.info(text2bow)
-                if len(text2bow):
-                    topics = self.topic_model[text2bow]
-                    logging.info("Topics distribution: ")
-                    logging.info(topics)
-                    #    topics = get_topics_with_prob(transcript_text)
-                    # Shared argmax (processing_common) — was duplicated and
-                    # drifting between the live and posthoc processors.
-                    topic_id = select_topic_id(topics, default=topic_id)
-                logging.info(topic_id)
+                topic_id = self._optional('topic', lambda: self._topic_id(transcript_text), default=-1)
 
             # Get DoA (Direction of Arrival)
             doa = None
             if self.config.doa and self.config.channels == 6:
                 word_timings = [(word.start_time.seconds + (word.start_time.nanos / NANO),
                                  word.end_time.seconds + (word.end_time.nanos / NANO)) for word in words]
-                doa = calculateDOA(start_time, audio_data, word_timings,
-                                   16000, self.config.channels, self.config.depth)
-
-            features = None
-            if self.config.features:
-                features = scorer_factory.get_scorer(cf.scorer()).detect_features(transcript_text)
+                doa = self._optional('doa', lambda: calculateDOA(
+                    start_time, audio_data, word_timings,
+                    16000, self.config.channels, self.config.depth))
 
             start_time += self.config.start_offset
             end_time += self.config.start_offset
-            
+
             # Perform Speaker Diarization (interruption-aware: a segment where
             # the speaker flips mid-way is split at the change point into two
             # cleanly-attributed rows; true overlap is tagged contested).
@@ -264,8 +286,11 @@ class AudioProcessor:
                         self.diarization_model)
                 except Exception as e:
                     logging.warning('segment split failed (%s); whole-segment matching', e)
-                    tag, sid, conf = checkFingerprints(
-                        audio_data, self.fingerprints, self.diarization_model)
+                    # Unattributed rather than lost if matching fails too.
+                    tag, sid, conf = self._optional(
+                        'fingerprint match',
+                        lambda: checkFingerprints(audio_data, self.fingerprints, self.diarization_model),
+                        default=(None, -1, None))
                     parts = [{'start': start_time, 'end': end_time,
                               'text_slice': (0, len(words)), 'alias': tag,
                               'speaker_id': sid, 'contested': None,
@@ -275,9 +300,7 @@ class AudioProcessor:
                     if multi:
                         w0, w1 = p['text_slice']
                         p_text = ' '.join(word_tuples[i][0] for i in range(w0, w1)).strip() or transcript_text
-                        p_questions = features_detector.detect_questions(p_text) if self.config.transcribe else None
-                        p_keywords = keyword_detector.detect_keywords(p_text, self.config.keywords) if self.config.keywords else None
-                        p_features = scorer_factory.get_scorer(cf.scorer()).detect_features(p_text) if self.config.features else None
+                        p_questions, p_keywords, p_features = self._enrich(p_text)
                     else:
                         p_text, p_questions, p_keywords, p_features = transcript_text, questions, keywords, features
                     self.speaker_metrics_process.process_transcript(
@@ -314,16 +337,18 @@ class AudioProcessor:
                         os.makedirs(emb_dir, exist_ok=True)
                         self.embeddings_file = os.path.join(
                             emb_dir, '{0}-{1}.npy'.format(self.config.auth_key, uuid.uuid4().hex[:8]))
-                    embedding = embedSignal(audio_data, self.diarization_model)
+                    embedding = self._optional(
+                        'speaker embedding', lambda: embedSignal(audio_data, self.diarization_model))
                     # Saved once at completion (send_speaker_taggings) — the
                     # old per-utterance re-save of the whole array was O(n²)
                     # disk writes and raced concurrent appends.
-                    with self._embeddings_lock:
-                        self.embeddings.append({
-                            'embedding': embedding,
-                            'start': start_time,
-                            'end': end_time,
-                        })
+                    if embedding is not None:
+                        with self._embeddings_lock:
+                            self.embeddings.append({
+                                'embedding': embedding,
+                                'start': start_time,
+                                'end': end_time,
+                            })
                 success, transcript_id = callbacks.post_transcripts(
                     self.config.auth_key, start_time, end_time,
                     transcript_text, doa, questions, keywords,

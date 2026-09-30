@@ -184,19 +184,21 @@ class SpeakerProcessor:
         self.participation_scores = np.subtract(np.multiply(np.divide(self.contributions, self.length), self.participants), 1)
 
         processing_time =  time.time() - processing_timer
+        # Snapshot under the lock; the post below is a 30s-timeout HTTP call
+        # and holding process_lock across it stalled every other utterance.
+        metrics = (speaker_ids,
+                   self.participation_scores.tolist(),
+                   self.internal_cohesion.tolist(),
+                   self.overall_responsivity.tolist(),
+                   self.social_impact.tolist(),
+                   self.newness.tolist(),
+                   self.communication_density.tolist())
 
-        success = callbacks.post_speaker_transcript_metrics(speaker_transcript_data,
-                                                  speaker_ids,
-                                                  self.participation_scores.tolist(),
-                                                  self.internal_cohesion.tolist(),
-                                                  self.overall_responsivity.tolist(),
-                                                  self.social_impact.tolist(),
-                                                  self.newness.tolist(),
-                                                  self.communication_density.tolist())
+       success = callbacks.post_speaker_transcript_metrics(speaker_transcript_data, *metrics)
 
-        if success:
-           logging.info('[Speaker_Metrics]Processing posted successfully for client {0} (Processing time: {1}) @ {2}'.format(self.auth_key, processing_time, processing_timer))
-        else:
-           logging.warning('[Speaker_Metrics]Processing results FAILED to post for client {0} (Processing time: {1})'.format(self.auth_key, processing_time))
+       if success:
+          logging.info('[Speaker_Metrics]Processing posted successfully for client {0} (Processing time: {1}) @ {2}'.format(self.auth_key, processing_time, processing_timer))
+       else:
+          logging.warning('[Speaker_Metrics]Processing results FAILED to post for client {0} (Processing time: {1})'.format(self.auth_key, processing_time))
       except Exception as e:
          logging.error('[Speaker Metrics]Processing FAILED for client {0}: {1}'.format(self.auth_key, e))

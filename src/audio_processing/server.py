@@ -28,6 +28,7 @@ from ws_protocol import WsMessageMixin  # shared onMessage/onClose
 import audio_bytes
 import safe_names
 from audio_buffer import AudioBuffer
+import asr_ingest  # reactor-side ingest bookkeeping (stamped chunks, drop counter)
 from processor import AudioProcessor
 from twisted.internet import reactor, task
 from autobahn.twisted.websocket import WebSocketServerFactory
@@ -60,6 +61,7 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
         self.audio_buffer = None
         self.asr_audio_queue = None
         self.asr_transcript_queue = None
+        self._ingest = None
         self.asr = None
         self.processor = None
         self.last_message = time.time()
@@ -204,7 +206,6 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
                 data = self.resample_data(data)
                 self.audio_buffer.append(data)
                 asr_data = self.reduce_channels(1, data)
-                # self.asr_audio_queue.put(asr_data)
                 self.enqueue_latest_audio_chunk(asr_data)
                 # Save audio data.
                 if cf.record_reduced():
@@ -374,41 +375,50 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
     def reduce_wav_channel(self,channels_wanted,wav):
         return audio_bytes.reduce_wav_channel(channels_wanted, wav, self.config.channels)
 
-    def enqueue_latest_audio_chunk(self, asr_data, timeout=0.05):
+    def enqueue_latest_audio_chunk(self, asr_data):
+        """Non-blocking hand-off to the ASR thread; runs on the reactor.
+
+        Never waits: the old 50ms blocking put stalled every pod's ingest
+        whenever one consumer lagged. The chunk carries its absolute sample
+        offset (counted over everything received), so a drop shifts no later
+        timestamp. When the queue is full the OLDEST chunk is evicted — the
+        newest audio is worth more to live captions — and the loss is counted
+        and reported at WARNING, at most every ~30s per pod.
         """
-        Keep only the most recent chunk in the queue.
-        If the queue is full, remove the stale queued chunk and replace it.
-        """
+        chunk = asr_ingest.StampedChunk(asr_data, self._ingest.received(len(asr_data)))
         try:
-            self.asr_audio_queue.put(asr_data, timeout=timeout)
+            self.asr_audio_queue.put_nowait(chunk)
             return True
         except Full:
             pass
-
-        # Queue is full: drop the old queued item
+        lost = 0
         try:
-            self.asr_audio_queue.get_nowait()  # drop one to make room (result unused)
-            # optional: if you use task_done semantics elsewhere, call task_done here
-            # self.asr_audio_queue.task_done()
+            lost = len(self.asr_audio_queue.get_nowait())
         except Empty:
             pass
-
-        # Try again to insert the latest chunk
         try:
-            self.asr_audio_queue.put_nowait(asr_data)
-            logging.debug("Replaced stale ASR audio chunk with latest chunk.")
-            return True
+            self.asr_audio_queue.put_nowait(chunk)
         except Full:
-            logging.warning("Could not enqueue latest ASR audio chunk; dropping it.")
-            return False
+            lost += len(chunk)
+        if lost:
+            warning = self._ingest.dropped(lost, time.time())
+            if warning:
+                logging.warning('%s: %s', self.config.auth_key, warning)
+        return False
 
     def signal_start(self):
         self.audio_buffer = AudioBuffer(self.config)
-        self.asr_audio_queue = queue.Queue(maxsize=3)
+        self._ingest = asr_ingest.IngestCounter()
+        self.asr_audio_queue = queue.Queue(maxsize=asr_ingest.QUEUE_CHUNKS)
         self.asr_transcript_queue = queue.Queue()
         # The session's locked-at-creation ASR choice wins; the deployment
         # config is the default for sessions that didn't choose.
         self.asr = create_asr(getattr(self.config, 'asr', None) or cf.asr(), self.asr_audio_queue, self.asr_transcript_queue, self.config, self.stream_data, self.interval)
+        # Connectors with a shared worker report it degraded/ok; relay that
+        # to this pod's client (fires on worker threads; send_json marshals
+        # onto the reactor).
+        if hasattr(self.asr, 'on_status'):
+            self.asr.on_status = self._send_asr_status
         self.asr.start()
         self.processor = AudioProcessor(self.audio_buffer, self.asr_transcript_queue, diarization_model, semantic_model, self.config)
         self.processor.start()
@@ -416,6 +426,13 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
 
     def send_close(self, message):
         self.send_json({'type': 'end', 'message': message})
+
+    def _send_asr_status(self, state, message=None):
+        # Browser contract: {"type": "asr_status", "state": "ok"|"degraded", "message"?: str}
+        status = {'type': 'asr_status', 'state': state}
+        if message:
+            status['message'] = message
+        self.send_json(status)
 
     def signal_end(self):
         if self.end_signaled:
@@ -484,6 +501,12 @@ if __name__ == '__main__':
     auth_connections = task.LoopingCall(cm.check_connection_authentication)
     auth_connections.start(5.0)
     factory = WebSocketServerFactory()
+    # Keepalive: a dead peer used to linger up to 300s (inactivity sweep)
+    # holding its ASR threads. Payload cap: enrollment sends one ~60s webm
+    # blob (3 Mbps video + 128 kbps audio, ~23.5 MB) as a single message;
+    # live audio chunks are ~16 KB.
+    factory.setProtocolOptions(autoPingInterval=10, autoPingTimeout=20,
+                               maxMessagePayloadSize=64 * 1024 * 1024)
     factory.protocol = ServerProtocol
 
     reactor.listenTCP(int(os.environ.get('DC_AUDIO_WS_PORT', 9000)), factory)
