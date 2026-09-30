@@ -218,3 +218,33 @@ def test_snapshot_and_host_fields_fit_the_csv_header():
                       ws_url="ws://x/audio_socket", stop=None)
     assert set(pod.snapshot()) <= set(loadgen.CSV_FIELDS)
     assert {"load1", "mem_free_mb", "gpu_util", "gpu_mem_mb", "drop_warnings"} <= set(loadgen.CSV_FIELDS)
+
+
+def test_parse_audio_metrics_and_backlog_verdict():
+    text = (
+        '# HELP x\n'
+        'blinc_audio_window_backlog_seconds{pod="k1",service="audio"} 12\n'
+        'blinc_audio_window_backlog_seconds{service="audio",pod="k2"} 0\n'
+        'blinc_asr_windows_waiting 3\n'
+        'blinc_asr_slots{state="busy"} 2\n'
+        'blinc_asr_slots{state="free"} 0\n'
+    )
+    backlog, scalars = core.parse_audio_metrics(text)
+    assert backlog == {"k1": 12.0, "k2": 0.0}
+    assert scalars == {"asr_windows_waiting": 3.0, "asr_busy_slots": 2.0}
+    # The server backlog decides the verdict even when transcript lag is huge
+    # (silence in the source makes lag_s grow without any real backlog).
+    rows = []
+    for tick in range(3):
+        for pod in (1, 2):
+            rows.append({"step": 1, "pods_target": 2, "step_elapsed_s": 70 + tick * 5, "ts": "t%d" % tick,
+                         "pod": pod, "lag_s": 150.0, "server_backlog_s": 12.0, "asr_state": "ok",
+                         "degraded_events": 0, "drop_warnings": 0, "gpu_util": 50, "gpu_mem_mb": 1, "load1": 1})
+    steps, verdict = core.summarize(rows, max_lag_s=30, warmup_s=60)
+    assert steps[0]["passed"] and steps[0]["verdict_measure"] == "server_backlog"
+    assert verdict["max_pods_under_lag"] == 2 and "server backlog" in verdict["text"]
+    # Without the scrape the transcript lag is the fallback.
+    for r in rows:
+        r["server_backlog_s"] = None
+    steps, verdict = core.summarize(rows, max_lag_s=30, warmup_s=60)
+    assert not steps[0]["passed"] and steps[0]["verdict_measure"] == "transcript_lag"

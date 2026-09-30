@@ -254,6 +254,13 @@ def summarize(rows, max_lag_s, warmup_s=0.0):
             ticks.setdefault(r["ts"], []).append(_f(r, "lag_s"))
         tick_p95 = [percentile(v, 95) for v in ticks.values()]
         lags = [_f(r, "lag_s") for r in rows_]
+        # Server-side backlog per tick (None when the tool could not scrape it).
+        bl_ticks = {}
+        for r in rows_:
+            if _f(r, "server_backlog_s") is not None:
+                bl_ticks.setdefault(r["ts"], []).append(_f(r, "server_backlog_s"))
+        bl_tick_p95 = [percentile(v, 95) for v in bl_ticks.values()]
+        backlogs = [_f(r, "server_backlog_s") for r in rows_ if _f(r, "server_backlog_s") is not None]
         drops = [_f(r, "drop_warnings") for r in all_rows if _f(r, "drop_warnings") is not None]
         gpu = [_f(r, "gpu_util") for r in rows_ if _f(r, "gpu_util") is not None]
         out.append({
@@ -264,6 +271,10 @@ def summarize(rows, max_lag_s, warmup_s=0.0):
             "p95_lag_s": percentile(lags, 95),
             "max_lag_s": max((l for l in lags if l is not None), default=None),
             "worst_tick_p95_s": max((p for p in tick_p95 if p is not None), default=None),
+            "p95_backlog_s": percentile(backlogs, 95) if backlogs else None,
+            "max_backlog_s": max(backlogs) if backlogs else None,
+            "worst_tick_backlog_p95_s": max((p for p in bl_tick_p95 if p is not None), default=None),
+            "verdict_measure": "server_backlog" if bl_tick_p95 else "transcript_lag",
             "degraded_pods": sorted({r["pod"] for r in all_rows
                                      if r.get("asr_state") == "degraded" or (_f(r, "degraded_events") or 0) > 0}),
             "drop_warnings": int(max(drops) - min(drops)) if drops else 0,
@@ -271,15 +282,43 @@ def summarize(rows, max_lag_s, warmup_s=0.0):
             "gpu_util_max": max(gpu) if gpu else None,
             "gpu_mem_mb_max": max((_f(r, "gpu_mem_mb") for r in rows_ if _f(r, "gpu_mem_mb") is not None), default=None),
             "load1_max": max((_f(r, "load1") for r in rows_ if _f(r, "load1") is not None), default=None),
-            "passed": bool(tick_p95) and all(p is not None and p < max_lag_s for p in tick_p95),
+            # The server's own backlog decides when available; transcript lag is
+            # the fallback (it also grows through silence, so it over-reports).
+            "passed": (bool(bl_tick_p95) and all(p is not None and p < max_lag_s for p in bl_tick_p95))
+                      if bl_tick_p95 else
+                      (bool(tick_p95) and all(p is not None and p < max_lag_s for p in tick_p95)),
         })
     passed = [s["pods"] for s in out if s["passed"]]
     verdict = {
         "max_lag_s": max_lag_s,
         "warmup_s": warmup_s,
         "max_pods_under_lag": max(passed) if passed else 0,
-        "text": ("VERDICT: %d simultaneous pods kept p95 caption lag under %.0f s for a whole step"
-                 % (max(passed), max_lag_s)) if passed else
-                ("VERDICT: no step kept p95 caption lag under %.0f s" % max_lag_s),
+        "measure": out[0]["verdict_measure"] if out else None,
+        "text": ("VERDICT: %d simultaneous pods kept p95 %s under %.0f s for a whole step"
+                 % (max(passed), (out[0]["verdict_measure"] if out else "lag").replace("_", " "), max_lag_s)) if passed else
+                ("VERDICT: no step kept p95 %s under %.0f s"
+                 % ((out[0]["verdict_measure"] if out else "lag").replace("_", " "), max_lag_s)),
     }
     return out, verdict
+
+
+# --- server-side backlog (the audio server's own view) -------------------------
+_BACKLOG_RE = re.compile(r'^blinc_audio_window_backlog_seconds\{[^}]*pod="([^"]+)"[^}]*\}\s+([0-9.eE+-]+)', re.M)
+_SCALAR_RE = {
+    "asr_windows_waiting": re.compile(r'^blinc_asr_windows_waiting(?:\{[^}]*\})?\s+([0-9.eE+-]+)', re.M),
+    "asr_busy_slots": re.compile(r'^blinc_asr_slots\{[^}]*state="busy"[^}]*\}\s+([0-9.eE+-]+)', re.M),
+}
+
+
+def parse_audio_metrics(text):
+    """Per-pod window backlog (seconds of audio queued for ASR, keyed by the
+    pod's processing key) plus the pool-wide counters, from the audio server's
+    Prometheus text on 127.0.0.1:9111. Transcript lag grows through silent
+    stretches (skipped windows emit no transcript), so this is the measure that
+    says whether the server is keeping up."""
+    backlog = {m.group(1): float(m.group(2)) for m in _BACKLOG_RE.finditer(text)}
+    scalars = {}
+    for name, rx in _SCALAR_RE.items():
+        m = rx.search(text)
+        scalars[name] = float(m.group(1)) if m else None
+    return backlog, scalars

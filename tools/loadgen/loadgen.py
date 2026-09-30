@@ -11,6 +11,7 @@ import json
 import os
 import signal
 import subprocess
+import urllib.request
 import sys
 import threading
 import time
@@ -306,14 +307,25 @@ class Pod:
 
 
 # --- host metrics -------------------------------------------------------------
+AUDIO_METRICS_URL = os.environ.get("BLINC_LOADGEN_AUDIO_METRICS", "http://127.0.0.1:9111/metrics")
+
+
 class HostSampler:
     def __init__(self, log_path):
         self.log_path = log_path
         self.offset = os.path.getsize(log_path) if os.path.exists(log_path) else 0
         self.drop_warnings = 0
+        self.backlog_by_key = {}   # processing key -> seconds queued for ASR (from the audio server)
 
     def sample(self):
-        out = {"load1": round(os.getloadavg()[0], 2), "mem_free_mb": None, "gpu_util": None, "gpu_mem_mb": None}
+        out = {"load1": round(os.getloadavg()[0], 2), "mem_free_mb": None, "gpu_util": None, "gpu_mem_mb": None,
+               "asr_windows_waiting": None, "asr_busy_slots": None}
+        try:
+            with urllib.request.urlopen(AUDIO_METRICS_URL, timeout=2) as resp:
+                self.backlog_by_key, scalars = core.parse_audio_metrics(resp.read().decode("utf-8", "replace"))
+                out.update(scalars)
+        except Exception:
+            self.backlog_by_key = {}
         try:
             with open("/proc/meminfo") as f:
                 for line in f:
@@ -367,8 +379,8 @@ def load_pcm(path):
 CSV_FIELDS = ["ts", "elapsed_s", "step", "pods_target", "step_elapsed_s", "pod", "alias", "device_id",
               "connected", "ready", "ended", "reconnects", "audio_sent_s", "audio_clock_s", "start_offset_s",
               "latest_transcript_end_s", "lag_s", "transcripts_total", "degraded_events", "ok_events",
-              "asr_state", "dropped_chunks", "poll_errors", "load1", "mem_free_mb", "gpu_util", "gpu_mem_mb",
-              "drop_warnings"]
+              "asr_state", "dropped_chunks", "poll_errors", "server_backlog_s", "load1", "mem_free_mb", "gpu_util",
+              "gpu_mem_mb", "asr_windows_waiting", "asr_busy_slots", "drop_warnings"]
 
 
 def parse_args(argv):
@@ -477,12 +489,16 @@ def main(argv=None):
                             "step_elapsed_s": round(now - step_t0, 1)}
                     for pod in pods:
                         row = dict(base, **pod.snapshot(), **host)
+                        row["server_backlog_s"] = host_sampler.backlog_by_key.get(pod.key)
                         rows.append(row)
                         writer.writerow(row)
                     f.flush()
                     lags = [r["lag_s"] for r in rows[-len(pods):] if r["lag_s"] is not None]
-                    log("step %d t=%.0fs pods=%d connected=%d p95 lag=%s max=%s transcripts=%d degraded=%d drops=%d load=%.1f gpu=%s%%"
+                    bls = [r["server_backlog_s"] for r in rows[-len(pods):] if r["server_backlog_s"] is not None]
+                    log("step %d t=%.0fs pods=%d connected=%d backlog p95=%s max=%s waiting=%s busy=%s | lag p95=%s max=%s transcripts=%d degraded=%d drops=%d load=%.1f gpu=%s%%"
                         % (step, now - step_t0, len(pods), sum(1 for p in pods if p.ws is not None),
+                           core.percentile(bls, 95), max(bls) if bls else None,
+                           host["asr_windows_waiting"], host["asr_busy_slots"],
                            core.percentile(lags, 95), max(lags) if lags else None,
                            sum(p.transcripts_total for p in pods), sum(1 for p in pods if p.asr_state == "degraded"),
                            host["drop_warnings"], host["load1"], host["gpu_util"]))
@@ -510,7 +526,8 @@ def main(argv=None):
         if rows:
             steps_summary, verdict = core.summarize(rows, args.max_lag, args.warmup_seconds)
             for s in steps_summary:
-                log("step %(step)d: %(pods)d pods, %(ticks)d ticks, lag median=%(median_lag_s)s p95=%(p95_lag_s)s "
+                log("step %(step)d: %(pods)d pods, %(ticks)d ticks, backlog p95=%(p95_backlog_s)s max=%(max_backlog_s)s "
+                    "worst-tick-p95=%(worst_tick_backlog_p95_s)s [%(verdict_measure)s]; lag median=%(median_lag_s)s p95=%(p95_lag_s)s "
                     "max=%(max_lag_s)s worst-tick-p95=%(worst_tick_p95_s)s, degraded pods=%(degraded_pods)s, "
                     "drop warnings=%(drop_warnings)s, gpu util mean=%(gpu_util_mean)s max=%(gpu_util_max)s, "
                     "gpu mem max=%(gpu_mem_mb_max)s MB, load1 max=%(load1_max)s, passed=%(passed)s" % s)
