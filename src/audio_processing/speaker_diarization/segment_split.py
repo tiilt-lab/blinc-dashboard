@@ -38,6 +38,21 @@ def _embed(int16_audio, verification):
     return emb / (np.linalg.norm(emb) + 1e-9)
 
 
+def _embed_batch(clips, verification):
+    """Unit embeddings for a list of clips in ONE encode_batch call when they
+    are equal length (the sliding windows always are; audit B.4: ~30 separate
+    encodes per segment). ECAPA's per-utterance feature norm and length-masked
+    pooling make rows independent, so this equals per-clip encodes up to float
+    rounding. Unequal lengths (a lone short clip) fall back to per-clip."""
+    if not clips:
+        return []
+    if len({len(c) for c in clips}) == 1:
+        sig = torch.tensor(np.stack([c.astype(np.float32) / 32768.0 for c in clips]))
+        embs = verification.encode_batch(sig)[:, 0].detach().cpu().numpy()
+        return [e / (np.linalg.norm(e) + 1e-9) for e in embs]
+    return [_embed(c, verification) for c in clips]
+
+
 def _score_prints(utt, fingerprints, verification):
     """[(sim, alias, speaker_id)] against the pod's prints, including any
     session-adapted references (same logic the whole-segment matcher uses)."""
@@ -63,22 +78,37 @@ def _window_votes(int16_audio, fingerprints, verification):
     """Per-window winner labels across the clip: [(t_center, alias|None, sim)]."""
     n = len(int16_audio)
     win, hop = int(WIN_S * SR), int(HOP_S * SR)
-    votes = []
+    clips, centers = [], []
     pos = 0
     while pos + win <= n or (pos == 0 and n >= int(MIN_PART_S * SR)):
-        clip = int16_audio[pos:pos + win] if pos + win <= n else int16_audio
-        try:
-            scored = _score_prints(_embed(clip, verification), fingerprints,
-                                   verification)
-        except Exception:
-            scored = []
-        if scored and scored[0][0] >= WIN_FLOOR:
-            votes.append((pos / SR + WIN_S / 2, scored[0][1], scored[0][0]))
-        else:
-            votes.append((pos / SR + WIN_S / 2, None, 0.0))
+        clips.append(int16_audio[pos:pos + win] if pos + win <= n else int16_audio)
+        centers.append(pos / SR + WIN_S / 2)
         pos += hop
         if pos + win > n and pos > 0:
             break
+    # One batched encode for all windows; if the batch itself fails, degrade
+    # to per-window encodes so a single bad window still only costs its vote.
+    try:
+        embs = _embed_batch(clips, verification)
+    except Exception:
+        embs = []
+        for clip in clips:
+            try:
+                embs.append(_embed(clip, verification))
+            except Exception:
+                embs.append(None)
+    votes = []
+    for t, utt in zip(centers, embs):
+        scored = []
+        if utt is not None:
+            try:
+                scored = _score_prints(utt, fingerprints, verification)
+            except Exception:
+                scored = []
+        if scored and scored[0][0] >= WIN_FLOOR:
+            votes.append((t, scored[0][1], scored[0][0]))
+        else:
+            votes.append((t, None, 0.0))
     return votes
 
 

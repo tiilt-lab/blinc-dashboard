@@ -130,6 +130,28 @@ class StreamingChunkDecoder:
 
     FPS = 10
     FEED_QUEUE_BLOBS = 64
+    # Decoder thread cap (audit B.3): libvpx/dav1d otherwise start a thread
+    # per core for EVERY pod; two keep up with a 10 fps analytics feed.
+    DECODE_THREADS = 2
+    # Optional height cap for the analytics feed (0 = native). Left OFF on
+    # purpose: the head/object detectors letterbox to 640 px and would not
+    # care, but face recognition crops each face from the NATIVE frame and
+    # gates it at 120 px (detect.prepare_quality_face min_size) before
+    # dlib's CNN, and the gaze head crop is native too. Phones capture
+    # 1080p (ideal 1920x1080), so a 720p rescale shrinks every face by a
+    # third and pushes small/far faces under that gate — a metrics change,
+    # not a memory-only one. Frame memory is bounded downstream instead
+    # (bounded_batch_queue). Set to 720 once those gates are frame-relative.
+    ANALYTICS_MAX_HEIGHT = 0
+
+    @staticmethod
+    def _analytics_dims(width, height, max_height):
+        # Output frame size for the rawvideo reader: native, or scaled to
+        # max_height keeping aspect with an even width (chroma subsampling).
+        if not max_height or height <= max_height:
+            return width, height
+        w = int(round(width * max_height / float(height)))
+        return max(2, w - (w % 2)), int(max_height)
 
     def __init__(self, interval, sink, label):
         self.interval = interval
@@ -219,14 +241,15 @@ class StreamingChunkDecoder:
                 'analytics decoder could not probe dimensions for %s - '
                 'skipping until the next header', self.label)
             return False
-        self.width, self.height = dims
-        # Follow-up (audit B.3): '-vf', 'fps=10,scale=-2:720' would cut a
-        # 1080p pod's decoded-frame memory ~2.25x, but it changes the frames
-        # the analytics models see, so it is deliberately NOT applied here;
-        # memory is bounded downstream instead (bounded_batch_queue).
+        self.width, self.height = self._analytics_dims(dims[0], dims[1], self.ANALYTICS_MAX_HEIGHT)
+        # Explicit scale dims (not ffmpeg's -2 auto width) so the rawvideo
+        # reader's frame size is computed here, not guessed from its rounding.
+        vf = 'fps={0}'.format(self.FPS)
+        if (self.width, self.height) != tuple(dims):
+            vf += ',scale={0}:{1}'.format(self.width, self.height)
         self.proc = subprocess.Popen(
-            ['ffmpeg', '-v', 'error', '-i', 'pipe:0',
-             '-vf', 'fps={0}'.format(self.FPS), '-pix_fmt', 'rgb24',
+            ['ffmpeg', '-v', 'error', '-threads', str(self.DECODE_THREADS),
+             '-i', 'pipe:0', '-vf', vf, '-pix_fmt', 'rgb24',
              '-f', 'rawvideo', 'pipe:1'],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL)
@@ -744,9 +767,12 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
         if self.chunk_decoder is not None:
             self.chunk_decoder.stop()
 
+        # The worker join runs off the reactor (audit B.7); stop() returns
+        # its Deferred, or None when there was nothing to join.
+        stopping = None
         if  self.video_processor:
-            self.video_processor.stop()
-            logging.info("Video processor stopped for client {0}".format(self.config.auth_key))
+            stopping = self.video_processor.stop()
+            logging.info("Video processor stopping for client {0}".format(self.config.auth_key))
 
         if self.config:
             # 30s-timeout HTTP off the reactor; teardown must not stall ingest.
@@ -755,8 +781,20 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
             # Live pods never send last_batch, so their analytics queues are
             # never popped by the schedulers — evict here or a disconnected
             # pod's queued frame payloads stay pinned until process recycle.
-            image_object_detection.frame_queue_manager.pop(self.config.auth_key, None)
-            image_object_detection.accumulator_queue_manager.pop(self.config.auth_key, None)
+            # Sequenced AFTER the worker join: a last late batch from the
+            # worker would otherwise re-create the queue we just popped.
+            key = self.config.auth_key
+
+            def _evict(_result=None):
+                image_object_detection.frame_queue_manager.pop(key, None)
+                image_object_detection.accumulator_queue_manager.pop(key, None)
+
+            if stopping is not None:
+                stopping.addErrback(lambda f: logging.warning(
+                    'video processor join for %s failed: %s', key, f.getErrorMessage()))
+                stopping.addCallback(_evict)
+            else:
+                _evict()
         else:
             cm.remove(self, None, None)
 

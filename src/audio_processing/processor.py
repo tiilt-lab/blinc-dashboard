@@ -26,6 +26,7 @@ from topic_modeling.topic_modeling import preprocess_transcript
 import config as cf
 from processing_common import select_topic_id, save_embeddings, load_embeddings
 from completion_latch import CompletionLatch
+import segment_pool  # process-wide bounded utterance pool (audit B.4)
 # from source_seperation import source_seperation_pre_trained
 # from server.topic_modeling.topicmodeling import get_topics_with_prob
 # For converting nano seconds to seconds.
@@ -182,12 +183,14 @@ class AudioProcessor:
                     (words[-1].end_time.nanos / NANO)
                 transcript_audio_data = self.audio_buffer.extract(
                     start_time, end_time)
-                # Start processing thread for DoA, keywords, feature, etc.
+                # DoA, keywords, features etc. run on the process-wide
+                # bounded pool (was an uncapped thread per segment). submit
+                # never blocks; under backlog the oldest waiting segment is
+                # degraded to lite (transcript still posted, extras skipped).
                 self._latch.task_started()
-                transcript_thread = threading.Thread(target=self.process_transcript, args=(
-                    transcript_data, transcript_audio_data, start_time, end_time))
-                transcript_thread.daemon = True
-                transcript_thread.start()
+                segment_pool.shared().submit(
+                    self.process_transcript,
+                    transcript_data, transcript_audio_data, start_time, end_time)
         self._latch.mark_asr_complete()
         logging.info('Processing thread stopped for {0}.'.format(
             self.config.auth_key))
@@ -207,9 +210,11 @@ class AudioProcessor:
                             stage, self.config.auth_key, e, exc_info=first)
             return default
 
-    def _enrich(self, text):
+    def _enrich(self, text, lite=False):
         """Questions / keywords / features for one transcript row, each optional."""
         questions = keywords = features = None
+        if lite:
+            return questions, keywords, features
         if self.config.transcribe:
             questions = self._optional('questions', lambda: features_detector.detect_questions(text))
         if self.config.keywords:
@@ -240,8 +245,10 @@ class AudioProcessor:
         logging.info(topic_id)
         return topic_id
 
-    # Processes a transcript and its related audio data.
-    def process_transcript(self, transcript_data, audio_data, start_time, end_time):
+    # Processes a transcript and its related audio data. ``lite`` (set by the
+    # pool under backlog) skips every optional stage except one whole-segment
+    # speaker match; the transcript is always posted.
+    def process_transcript(self, transcript_data, audio_data, start_time, end_time, lite=False):
         try:
             processing_timer = time.time()
             words = transcript_data.alternatives[0].words
@@ -249,16 +256,16 @@ class AudioProcessor:
             transcript_text = None
             if self.config.transcribe:
                 transcript_text = transcript_data.alternatives[0].transcript
-            questions, keywords, features = self._enrich(transcript_text)
+            questions, keywords, features = self._enrich(transcript_text, lite)
 
             # Get Topics
             topic_id = -1
-            if self.topic_model:
+            if self.topic_model and not lite:
                 topic_id = self._optional('topic', lambda: self._topic_id(transcript_text), default=-1)
 
             # Get DoA (Direction of Arrival)
             doa = None
-            if self.config.doa and self.config.channels == 6:
+            if self.config.doa and self.config.channels == 6 and not lite:
                 word_timings = [(word.start_time.seconds + (word.start_time.nanos / NANO),
                                  word.end_time.seconds + (word.end_time.nanos / NANO)) for word in words]
                 doa = self._optional('doa', lambda: calculateDOA(
@@ -279,13 +286,16 @@ class AudioProcessor:
                      w.start_time.seconds + (w.start_time.nanos / NANO) + self.config.start_offset,
                      w.end_time.seconds + (w.end_time.nanos / NANO) + self.config.start_offset)
                     for w in words]
-                try:
-                    parts = segment_split.split_and_attribute(
-                        np.frombuffer(audio_data, dtype=np.int16), word_tuples,
-                        start_time, end_time, self.fingerprints,
-                        self.diarization_model)
-                except Exception as e:
-                    logging.warning('segment split failed (%s); whole-segment matching', e)
+                parts = None
+                if not lite:  # lite: one encode instead of ~30 windowed ones
+                    try:
+                        parts = segment_split.split_and_attribute(
+                            np.frombuffer(audio_data, dtype=np.int16), word_tuples,
+                            start_time, end_time, self.fingerprints,
+                            self.diarization_model)
+                    except Exception as e:
+                        logging.warning('segment split failed (%s); whole-segment matching', e)
+                if parts is None:
                     # Unattributed rather than lost if matching fails too.
                     tag, sid, conf = self._optional(
                         'fingerprint match',
@@ -300,7 +310,7 @@ class AudioProcessor:
                     if multi:
                         w0, w1 = p['text_slice']
                         p_text = ' '.join(word_tuples[i][0] for i in range(w0, w1)).strip() or transcript_text
-                        p_questions, p_keywords, p_features = self._enrich(p_text)
+                        p_questions, p_keywords, p_features = self._enrich(p_text, lite)
                     else:
                         p_text, p_questions, p_keywords, p_features = transcript_text, questions, keywords, features
                     self.speaker_metrics_process.process_transcript(

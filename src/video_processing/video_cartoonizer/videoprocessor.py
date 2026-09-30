@@ -131,13 +131,22 @@ class VideoProcessor:
 
     def stop(self):
         self.running = False
-        # Bounded join: this runs on the reactor thread at disconnect; an
-        # unbounded join on a wedged worker froze ingest for every pod.
+        # Bounded join, OFF the reactor (audit B.7): stop() is called from
+        # signal_end on the reactor thread, where even a 10 s join per pod
+        # froze ingest for everyone at end of class. Returns the Deferred (or
+        # None when there is nothing to join) so the caller can sequence
+        # teardown that must follow the join.
         thread = getattr(self, 'vid_pro_thread', None)
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=10)
-            if thread.is_alive():
-                logging.warning('video processor thread did not stop within 10s; abandoning it (daemon)')
+        if thread is None or not thread.is_alive():
+            return None
+        key = getattr(self.config, 'auth_key', '?')
+
+        def _join(t=thread):
+            t.join(timeout=10)
+            if t.is_alive():
+                logging.warning('video processor thread for %s did not stop within 10s; abandoning it (daemon)', key)
+
+        return reactor_safety.defer_blocking(_join)
 
     def add_websocket_connection(self,web_socket):
         self.web_socket_connection = web_socket

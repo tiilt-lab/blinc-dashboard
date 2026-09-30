@@ -29,8 +29,11 @@ import audio_bytes
 import safe_names
 import redis_client  # shared lazy client (src/common); enrollment tokens live beside the session keys
 from enrollment_token import enrollment_allows
+import live_presence  # live_pod:<key> keys the post-hoc services defer to (src/common)
 from audio_buffer import AudioBuffer
 import asr_ingest  # reactor-side ingest bookkeeping (stamped chunks, drop counter)
+import segment_pool  # process-wide bounded utterance pool; drained at exit
+from ecapa_device import load_ecapa
 from processor import AudioProcessor
 from twisted.internet import reactor, task
 from autobahn.twisted.websocket import WebSocketServerFactory
@@ -51,7 +54,12 @@ _SEMANTIC_IDS = {
 }
 _semantic_choice = cf.semantic_embedder()
 semantic_model = SentenceTransformer(_SEMANTIC_IDS.get(_semantic_choice, _semantic_choice))
-diarization_model = SpeakerRecognition.from_hparams(source="speechbrain/spkrec-ecapa-voxceleb", savedir="pretrained_models/pretrained_ecapa")
+# ECAPA on CUDA when it is there and has >= 1.5 GB free, else CPU (audit
+# B.4). Every consumer (.emb.npy cache, enrollment check, live matching)
+# already moves embeddings to host memory, so the device is transparent.
+diarization_model, _ecapa_device = load_ecapa(
+    SpeakerRecognition.from_hparams,
+    source="speechbrain/spkrec-ecapa-voxceleb", savedir="pretrained_models/pretrained_ecapa")
 semantic_model.share_memory()
 
 class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
@@ -79,6 +87,8 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
         self.fingerprint_force = False
         # Serializes deferred enrollment-blob processing for this connection.
         self._fingerprint_lock = threading.Lock()
+        # LoopingCall refreshing this pod's live_pod:<key> presence.
+        self._presence = None
 
         logging.info('Loaded Diarization Model and Semantic Model...')
 
@@ -438,6 +448,38 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
         self.processor = AudioProcessor(self.audio_buffer, self.asr_transcript_queue, diarization_model, semantic_model, self.config)
         self.processor.start()
         self.running = True
+        self._start_presence()
+
+    # Live presence (common/live_presence): while this pod streams, the
+    # post-hoc services see live_pod:<processing_key> and defer GPU-heavy
+    # jobs. Redis I/O runs off the reactor (a stalled Redis must not stall
+    # ingest) and is best effort: the key's TTL covers a crashed process.
+    def _mark_live(self):
+        key = self.config.auth_key
+
+        def _fail(f):
+            logging.warning('live presence refresh failed for %s: %s', key, f.getErrorMessage())
+
+        reactor_safety.defer_blocking(
+            lambda: live_presence.mark_live(redis_client._redis(), key)).addErrback(_fail)
+
+    def _start_presence(self):
+        self._presence = task.LoopingCall(self._mark_live)
+        self._presence.start(live_presence.REFRESH_SECONDS, now=True)
+
+    def _stop_presence(self):
+        lc, self._presence = self._presence, None
+        if lc is not None and lc.running:
+            lc.stop()
+        if lc is not None and self.config:
+            key = self.config.auth_key
+
+            def _fail(f):
+                logging.warning('live presence clear failed for %s (TTL will expire it): %s',
+                                key, f.getErrorMessage())
+
+            reactor_safety.defer_blocking(
+                lambda: live_presence.clear_live(redis_client._redis(), key)).addErrback(_fail)
 
     def send_close(self, message):
         self.send_json({'type': 'end', 'message': message})
@@ -453,6 +495,7 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
         if self.end_signaled:
             return
         self.end_signaled = True
+        self._stop_presence()
         if self.asr:
             self.asr.stop()
         if self.processor:
@@ -527,4 +570,7 @@ if __name__ == '__main__':
     reactor.listenTCP(int(os.environ.get('DC_AUDIO_WS_PORT', 9000)), factory)
     logging.info('Audio Processing Service started.')
     reactor.run()
+    # Non-daemon pool threads: cancel queued utterances so a backlog can't
+    # hold the process past the reactor stop (in-flight ones finish).
+    segment_pool.shutdown()
     logging.info('Audio Processing Service ended.')

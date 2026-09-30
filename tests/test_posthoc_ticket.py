@@ -250,14 +250,15 @@ def test_queue_trigger_messages_carry_a_ticket_for_the_pod(monkeypatch):
     monkeypatch.setitem(sys.modules, "redis_helper", types.SimpleNamespace(RedisPosthocTicket=_Ticket))
 
     sent = []
-    monkeypatch.setattr(q, "_trigger", lambda url, init, start: sent.append((url, init, start)))
-    running = iter([True, False])
-    monkeypatch.setattr(q.posthoc_state, "is_running", lambda d: next(running))
+    # Phase 2: the queue runs the legs in sequence through _run_leg and
+    # mints a fresh ticket per leg (an audio leg can outlive the 15 min TTL).
+    monkeypatch.setattr(q, "_run_leg",
+                        lambda url, init, start, *a: sent.append((url, init, start)))
     monkeypatch.setattr(q.time, "sleep", lambda s: None)
 
     q._run_job({"session_id": 5, "device_id": 77, "models": None})
 
-    assert minted == [77]
+    assert minted == [77, 77]
     assert [s[0] for s in sent] == [q.AUDIO_WS, q.VIDEO_WS]
     for _url, init, _start in sent:
         assert init["sessiondeviceid"] == 77
