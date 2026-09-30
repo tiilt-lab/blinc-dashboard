@@ -51,3 +51,14 @@ def test_offset_defaults_to_zero_when_absent():
     del m["offset"]
     ok, res = validate_start_message(m)
     assert ok is True and res["offset"] == 0.0
+
+
+def test_start_time_is_accepted_as_the_offset():
+    # The BYOD page sends start_time (its reconnect backlog in seconds); the
+    # server used to read only 'offset' and silently ignored it.
+    msg = _msg(start_time=42.5)
+    del msg['offset']  # the browser never sends 'offset'
+    ok, res = validate_start_message(msg)
+    assert ok and res['offset'] == 42.5
+    ok, res = validate_start_message(_msg(start_time=1.0, offset=7.0))
+    assert ok and res['offset'] == 7.0

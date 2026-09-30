@@ -29,7 +29,11 @@ def validate_start_message(data):
     except Exception:
         return False, "channels must be an integer."
     try:
-        offset = float(data.get('offset', 0.0))
+        # The browser has always sent this as ``start_time`` (the seconds of
+        # audio it captured before this connection, e.g. a reconnect backlog);
+        # the server only ever read ``offset``, so backlog audio was placed at
+        # "now". Accept both names; ``offset`` wins if a client sends both.
+        offset = float(data.get('offset', data.get('start_time', 0.0)))
     except Exception:
         return False, "offset must be a float."
     try:
