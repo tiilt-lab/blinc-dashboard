@@ -228,6 +228,15 @@ def create_session(user, **kwargs):
     asr = request.json.get('asr', None)
     if asr is not None and asr not in ('google-cloud-speech', 'whisper', 'crisperwhisper'):
         return json_response({'message': 'asr must be google-cloud-speech, whisper or crisperwhisper.'}, 400)
+    # Live video analytics (GPU + ~3 cores per pod during class). False =
+    # "record now, analyse later": every pod is still recorded and the
+    # post-hoc video run is queued automatically when the session ends.
+    # Absent/null keeps today's behaviour.
+    live_video_analytics = request.json.get('liveVideoAnalytics', True)
+    if live_video_analytics is None:
+        live_video_analytics = True
+    if not isinstance(live_video_analytics, bool):
+        return json_response({'message': 'liveVideoAnalytics must be true or false.'}, 400)
     folder = request.json.get('folder', None)
     if folder == -1:
         folder = None
@@ -235,7 +244,8 @@ def create_session(user, **kwargs):
     # must accept the same set wherever they may file (editor, or admin).
     if folder and not wrappers.can_file_session_into(folder, user):
         return json_response({'message': 'Either the folder does not exist or invalid access'}, 404)
-    new_session = session_handler.create_session(user['id'], name, devices, keyword_list_id, topic_model_id, byod, features, doa, folder, asr=asr)
+    new_session = session_handler.create_session(user['id'], name, devices, keyword_list_id, topic_model_id, byod, features, doa, folder, asr=asr,
+                                                 live_video_analytics=live_video_analytics)
     return json_response(new_session.json())
 
 @api_routes.route('/api/v1/sessions/byod', methods=['POST'])

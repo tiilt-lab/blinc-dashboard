@@ -309,7 +309,8 @@ class SessionService {
     features,
     doa,
     folder,
-    asr
+    asr,
+    liveVideoAnalytics
   ) {
     const body = {
       name: name,
@@ -322,6 +323,8 @@ class SessionService {
       folder: folder,
       // live transcription engine, locked at creation
       asr: asr || null,
+      // false = record video now, analyse after class (default: analyse live)
+      liveVideoAnalytics: liveVideoAnalytics !== false,
     };
 
     return this.api.httpRequestCall("api/v1/sessions", "POST", body);

@@ -13,6 +13,9 @@ export class SessionModel {
   has_posthoc;
   pod_count;
   participant_count;
+  // false = "record now, analyse later": video is recorded during class but
+  // not analysed live; the post-hoc video run is queued at session end.
+  live_video_analytics;
   // The owner's email (sent for any session that is not the caller's own —
   // an admin's view of everyone's, or one shared through a folder), whether
   // it is theirs, and whether they may rename, move, delete or stop it.
@@ -71,6 +74,7 @@ export class SessionModel {
     model.pod_count = json['pod_count'] != null ? json['pod_count'] : null
     model.participant_count = json['participant_count'] != null ? json['participant_count'] : null
     model.analysis_running = json['analysis_running'] === true
+    model.live_video_analytics = json['live_video_analytics'] !== false
     model.owner = json['owner'] != null ? json['owner'] : null
     model.owned = json['owned'] !== false
     // Rename / move / delete allowed: owner, super, or an editor of its folder.

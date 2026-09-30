@@ -67,11 +67,14 @@ def test_ffmpeg_spawn_caps_decoder_threads_and_keeps_10_fps():
     d = _decoder_class()
     assert re.search(r"^\s*FPS = 10$", d, re.M)
     assert re.search(r"^\s*DECODE_THREADS = 2$", d, re.M)
-    spawn = d[d.index("self.proc = subprocess.Popen("):]
-    spawn = spawn[:spawn.index("stderr=subprocess.DEVNULL")]
+    # The command line is built by _ffmpeg_argv (software and cuda variants,
+    # pinned in test_video_hwdec.py) and spawned with the class's thread cap.
+    argv = _method_source(_read("server.py"), "StreamingChunkDecoder", "_ffmpeg_argv")
     # -threads is an INPUT option (before -i) so it governs the decoder
-    assert spawn.index("'-threads', str(self.DECODE_THREADS)") < spawn.index("'-i', 'pipe:0'")
-    assert "'-vf', vf" in spawn and "vf = 'fps={0}'.format(self.FPS)" in d
+    assert argv.index("'-threads', str(threads)") < argv.index("'-i', 'pipe:0'")
+    assert "'-vf', vf" in argv
+    assert "argv = self._ffmpeg_argv(mode, decoder, vf, self.DECODE_THREADS)" in d
+    assert "vf = 'fps={0}'.format(self.FPS)" in d
 
 
 def test_height_cap_exists_but_is_off_and_never_uses_scale_minus_two():

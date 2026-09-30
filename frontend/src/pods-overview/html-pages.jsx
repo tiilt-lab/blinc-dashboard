@@ -311,6 +311,14 @@ function RecordingBanner({ session, deviceCount, passcode, onShare, onEnd }) {
             <span className="text-tiilt-muted">
                 {deviceCount} {deviceCount === 1 ? "group" : "groups"}
             </span>
+            {session.live_video_analytics === false ? (
+                <span
+                    title="Video is recorded but not analysed during class; the attention and emotion analysis is queued when the session ends."
+                    className="rounded-md border border-tiilt-line bg-white px-1.5 py-0.5 text-xs text-tiilt-muted"
+                >
+                    video: recording only
+                </span>
+            ) : null}
             {passcode ? (
                 <button
                     onClick={onShare}

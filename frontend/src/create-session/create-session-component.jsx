@@ -57,6 +57,12 @@ function CreateSessionComponent(props) {
     const chosen = prev || 'crisperwhisper';
     return chosen === 'whisper' ? 'crisperwhisper' : chosen;
   });
+  // Live video analytics (GPU + ~3 cores per pod during class). Off = every
+  // group is still recorded and the video analysis is queued automatically
+  // when the session ends. Default on: nothing changes for existing habits.
+  const [liveVideoAnalytics, setLiveVideoAnalytics] = useState(
+    changedState && prevState.liveVideoAnalytics != null ? prevState.liveVideoAnalytics !== false : true
+  );
   const [selectedKeywordList] = useState(changedState ? prevState.selectedKeywordList : null);
   const [selectedTopicModel] = useState(changedState ? prevState.selectedTopicModel : null);
   const [selectedDevices, setSelectedDevices] = useState([]);
@@ -168,7 +174,7 @@ function CreateSessionComponent(props) {
       const deviceIds = selectedDevices.map(d => d.id);
       const keywordListId = (selectedKeywordList) ? selectedKeywordList.id : null;
       const topicModelId = (selectedTopicModel) ? selectedTopicModel.id : null;
-      const fetchData = new SessionService().createNewSession(finalName, deviceIds, keywordListId, topicModelId, byod, features, doa, folder, asr)
+      const fetchData = new SessionService().createNewSession(finalName, deviceIds, keywordListId, topicModelId, byod, features, doa, folder, asr, liveVideoAnalytics)
       fetchData.then(
         response=>{
           if(response.status === 200){
@@ -297,6 +303,8 @@ function CreateSessionComponent(props) {
     folderPath = {folderPath}
     asr = {asr}
     setAsr = {setAsr}
+    liveVideoAnalytics = {liveVideoAnalytics}
+    setLiveVideoAnalytics = {setLiveVideoAnalytics}
     goToSettings = {goToSettings}
     goToDevices = {goToDevices}
     devices = {devices}

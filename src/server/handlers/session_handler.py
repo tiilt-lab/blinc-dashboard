@@ -1,4 +1,5 @@
 import logging
+import os
 import database
 import socketio_helper
 from datetime import datetime, timezone
@@ -6,9 +7,16 @@ from app import socketio
 import json
 from device_commands import ConnectionManager
 from redis_helper import RedisSessions
+import posthoc_queue
 
-def create_session(user_id, name, devices, keyword_list_id, topic_model_id, byod, features, doa, folder, asr=None):
+def create_session(user_id, name, devices, keyword_list_id, topic_model_id, byod, features, doa, folder, asr=None, live_video_analytics=True):
     session, keywords = database.create_session(user_id, keyword_list_id, topic_model_id, name, folder)
+    # "Record now, analyse later" for video: only an explicit False turns the
+    # live pipeline off; None (older callers) keeps the historic behaviour.
+    live_video_analytics = live_video_analytics is not False
+    if session.live_video_analytics != live_video_analytics:
+        session.live_video_analytics = live_video_analytics
+        database.save_changes()
     if byod:
         session = database.generate_session_passcode(session.id)
     keywords = [keyword.keyword for keyword in keywords]
@@ -24,6 +32,11 @@ def create_session(user_id, name, devices, keyword_list_id, topic_model_id, byod
         # written once here and deleted at end_session). None -> deployment
         # default (audio service falls back to its config.ini asr=).
         'asr': asr,
+        # Read by the video service at 'start' (ProcessingConfig.from_json via
+        # the getredissessionconfig callback): False = record every chunk but
+        # start no decoder/analytics for the pod; end_session then queues the
+        # post-hoc video leg per recorded pod (queue_deferred_video_analysis).
+        'live_video_analytics': live_video_analytics,
     }
     RedisSessions.create_session(session.id, config)
     if devices:
@@ -55,6 +68,13 @@ def end_session(session_id):
         RedisSessions.delete_device_key(session_device.processing_key)
     database.save_changes()
 
+    # Record-only video sessions: the analysis nobody ran during class is
+    # queued now, one post-hoc VIDEO leg per pod that has a recording (no
+    # audio leg - live ASR ran as usual). Best effort: a queue problem must
+    # not stop the session from ending.
+    if session.live_video_analytics is False:
+        queue_deferred_video_analysis(session, session_devices)
+
     # Ping pod devices to stop session
     devices_to_ping = database.get_devices(ids=[session_device.device_id for session_device in session_devices if session_device.device_id is not None])
     for device in devices_to_ping:
@@ -63,6 +83,55 @@ def end_session(session_id):
         except Exception:
             logging.critical('Session End: Pod ' + str(device.id) + ' was unreachable or failed to respond.')
     return True, session
+
+def video_recordings_dir():
+    # src/video_processing/videorecordings, where the live video service
+    # writes "<key>_<session>_<pod>_(<ctime>)_orig.<webm|mp4>" (same
+    # resolution as routes/session._video_dirs).
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        '..', '..', 'video_processing', 'videorecordings')
+
+
+def pods_with_video_recordings(session_id, device_ids, recordings_dir):
+    """session_device ids (from device_ids) that have a raw video recording
+    for session_id on disk. The live recorder names files
+    ``<key>_<session_id>_<device_id>_(<ctime>)_orig.<ext>`` (mp4 pods append
+    ``_<n>``), so the ``_<session>_<pod>_(`` run is the exact match; the
+    numeric prefix of the key is the pod id again and is checked too."""
+    try:
+        names = os.listdir(recordings_dir)
+    except OSError as e:
+        logging.warning('deferred video analysis: cannot list %s (%s)', recordings_dir, e)
+        return []
+    found = set()
+    for device_id in {int(d) for d in device_ids}:
+        marker = '_{0}_{1}_('.format(int(session_id), device_id)
+        prefix = '{0}-'.format(device_id)
+        for fn in names:
+            if (fn.endswith('.webm') or fn.endswith('.mp4')) and fn.startswith(prefix) and marker in fn:
+                found.add(device_id)
+                break
+    return sorted(found)
+
+
+def queue_deferred_video_analysis(session, session_devices, recordings_dir=None):
+    """End of a live_video_analytics=False session: enqueue a post-hoc VIDEO
+    leg (only) for every pod that recorded video. Returns the pod ids queued."""
+    pods = pods_with_video_recordings(
+        session.id, [sd.id for sd in session_devices],
+        recordings_dir or video_recordings_dir())
+    if not pods:
+        logging.info('session %s ended record-only with no video recordings; nothing to analyse', session.id)
+        return []
+    try:
+        added = posthoc_queue.enqueue(session.id, pods, legs=('video',))
+    except Exception:
+        logging.exception('session %s: could not queue deferred video analysis for pods %s', session.id, pods)
+        return []
+    logging.info('session %s ended record-only: queued post-hoc video analysis for pods %s (already queued: %s)',
+                 session.id, added, sorted(set(pods) - set(added)))
+    return added
+
 
 def byod_join_session(name, passcode, collaborators):
     success, session_device, speakers = database.create_byod_session_device(passcode, name, collaborators)

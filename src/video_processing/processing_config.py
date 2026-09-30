@@ -31,8 +31,21 @@ def decide_key_check(outcome, unknown_since, now, grace=KEY_CHECK_GRACE_SECONDS)
     return (now - unknown_since) < grace, unknown_since
 
 
+def live_video_analytics_from_config(session_config):
+    """Pure. The session's Redis config (written by the API at creation) says
+    whether video is analysed live. Only an explicit off value turns the live
+    pipeline off; a missing key (sessions from before the option) keeps the
+    historic behaviour."""
+    if not isinstance(session_config, dict):
+        return True
+    value = session_config.get('live_video_analytics', True)
+    if isinstance(value, str):
+        return value.strip().lower() not in ('0', 'false', 'no', 'off')
+    return value is None or bool(value)
+
+
 class ProcessingConfig:
-    def __init__(self, auth_key, session_key, server_start, start_offset, sample_rate, encoding, channels, embeddingsFile,sessionId,deviceId,videocartoonify,video,mimeExtension):
+    def __init__(self, auth_key, session_key, server_start, start_offset, sample_rate, encoding, channels, embeddingsFile,sessionId,deviceId,videocartoonify,video,mimeExtension, live_video_analytics=True):
         self.auth_key = auth_key
         self.session_key = session_key
         self.server_start = server_start
@@ -47,6 +60,8 @@ class ProcessingConfig:
         self.videocartoonify = videocartoonify
         self.video = video
         self.mimeExtension = mimeExtension
+        # Session-level "record now, analyse later" (session.live_video_analytics).
+        self.live_video_analytics = live_video_analytics
         self.key_unknown_since = None  # see decide_key_check
         self._key_warned_at = None
 
@@ -73,6 +88,7 @@ class ProcessingConfig:
         video = data.get('Video',False) or cf.video_record_original() or cf.video_record_reduced()
 
         mimeExtension = data.get('mimeextension',None)
+        live_video_analytics = True
         # Check if auth is required and if key is valid.
         try:
             session_key = callbacks.get_redis_session_key(auth_key)
@@ -80,6 +96,7 @@ class ProcessingConfig:
                 session_config = json.loads(callbacks.get_redis_session_config(session_key))
                 server_start = datetime.strptime(session_config.get('server_start', None), "%Y-%m-%d %H:%M:%S")
                 start_offset = max((datetime.now(timezone.utc).replace(tzinfo=None) - server_start).total_seconds() - offset, 0.0)
+                live_video_analytics = live_video_analytics_from_config(session_config)
             elif not session_key and source == "posthoc processing":
                 server_start = datetime.strptime(data.get('server_start', None), "%Y-%m-%dT%H:%M:%S.%fZ")
                 convert_off_set = datetime.strptime(data.get('off_set_date', None), "%a %b %d %H:%M:%S %Y")
@@ -88,7 +105,8 @@ class ProcessingConfig:
                 logging.warning('Invalid key sent by device.')
                 return False, "Invalid key."
 
-            return True, ProcessingConfig(auth_key, session_key, server_start, start_offset, sample_rate, encoding, channels, embeddingsFile,sessionId,deviceId,videocartoonify,video,mimeExtension)
+            return True, ProcessingConfig(auth_key, session_key, server_start, start_offset, sample_rate, encoding, channels, embeddingsFile,sessionId,deviceId,videocartoonify,video,mimeExtension,
+                                          live_video_analytics=live_video_analytics)
         except Exception:
             return False, "could not verify auth_key"
 

@@ -14,6 +14,13 @@ class Session(db.Model):
     # owner_id keeps no rule on purpose, sessions are deleted explicitly.
     folder = db.Column(db.Integer, db.ForeignKey('folder.id', ondelete='SET NULL'), nullable=True)
     topic_model_id = db.Column(db.Integer, db.ForeignKey('topic_model.id', ondelete='SET NULL'), nullable=True)
+    # Live video analytics during class (per-pod ffmpeg decode + the GPU
+    # detectors, ~3 cores a pod). NULL/TRUE = analyse live, the historic
+    # behaviour; FALSE = "record now, analyse later": the video service only
+    # records, and end_session queues a post-hoc VIDEO leg per recorded pod.
+    # Mapped column: migration 3b4c5d6e7f80 must be applied before this code
+    # is deployed (a missing column raises on every Session query).
+    live_video_analytics = db.Column(db.Boolean, nullable=True)
 
     keywords = db.relationship("Keyword", lazy='joined', uselist=True, cascade="all, delete", passive_deletes=True)
 
@@ -29,12 +36,13 @@ class Session(db.Model):
     def __hash__(self):
         return hash((self.id))
 
-    def __init__(self, owner_id, name="Unnamed", folder=None, topic_model=None):
+    def __init__(self, owner_id, name="Unnamed", folder=None, topic_model=None, live_video_analytics=True):
         self.owner_id = owner_id
         self.name = name
         self.creation_date = datetime.now(timezone.utc).replace(tzinfo=None)
         self.folder = folder
         self.topic_model_id = topic_model
+        self.live_video_analytics = live_video_analytics is not False
 
 
     def get_length(self):
@@ -50,7 +58,9 @@ class Session(db.Model):
             length=self.get_length(), # length is not stored in database as it can be derived
             keywords=[keyword.keyword for keyword in self.keywords],
             folder=self.folder,
-            topic_model_id=self.topic_model_id
+            topic_model_id=self.topic_model_id,
+            # NULL (rows from before the column) reads as the historic "live".
+            live_video_analytics=self.live_video_analytics is not False
         )
 
     @staticmethod

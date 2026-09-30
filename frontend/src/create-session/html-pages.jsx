@@ -110,6 +110,33 @@ function CreateSessionPage(props) {
                   Locked once the session starts.
                 </p>
               </div>
+              <div>
+                <label className={fieldLabel}>Video</label>
+                <label
+                  htmlFor="chkLiveVideoAnalytics"
+                  className="flex cursor-pointer items-start gap-3 rounded-lg border border-tiilt-line bg-white px-3 py-2.5"
+                >
+                  <input
+                    id="chkLiveVideoAnalytics"
+                    type="checkbox"
+                    className="mt-0.5 h-4 w-4 flex-none cursor-pointer accent-tiilt"
+                    checked={props.liveVideoAnalytics !== false}
+                    onChange={(event) =>
+                      props.setLiveVideoAnalytics(event.target.checked)
+                    }
+                  />
+                  <span>
+                    <span className="block text-sm font-semibold text-tiilt-ink">
+                      Analyse video live (uses the GPU during class; off = record now, analyse after class)
+                    </span>
+                    <span className="block text-xs text-tiilt-muted">
+                      Off: every group&apos;s video is still recorded, and the
+                      attention and emotion analysis is queued automatically
+                      when the session ends.
+                    </span>
+                  </span>
+                </label>
+              </div>
             </div>
             <div className={footerBar}>
               <div className={footerRow}>

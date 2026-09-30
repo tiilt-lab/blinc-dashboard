@@ -424,10 +424,13 @@ def _run_job(job):
     # Legs finished on an earlier attempt (before a gpu_busy deferral) are
     # not re-run; the list is persisted with the job.
     done = job.setdefault("done_legs", [])
+    # A job may ask for a subset of legs (enqueue(..., legs=("video",)) for a
+    # session that recorded video without live analytics); absent = both.
+    wanted = job.get("legs") or list(LEGS)
     deadline = time.time() + _POD_TIMEOUT
     attempted, errors = [], {}
-    for scope in ("audio", "video"):
-        if scope in done:
+    for scope in LEGS:
+        if scope in done or scope not in wanted:
             continue
         attempted.append(scope)
         url = _leg_url(scope)
@@ -601,7 +604,22 @@ def start_runner():
     return _worker
 
 
-def enqueue(session_id, device_ids, models=None):
+LEGS = ("audio", "video")
+
+
+def _legs_extra(legs):
+    # None = both legs (the historic job); otherwise an ordered subset, e.g.
+    # ("video",) for a record-only session whose live ASR already ran.
+    if legs is None:
+        return None
+    chosen = [s for s in LEGS if s in set(legs)]
+    if not chosen or len(chosen) != len(set(legs)):
+        raise ValueError("legs must be a non-empty subset of %s, got %r" % (LEGS, legs))
+    return {"legs": chosen}
+
+
+def enqueue(session_id, device_ids, models=None, legs=None):
+    extra = _legs_extra(legs)
     with _mutation():
         queued_or_running = {j["device_id"] for j in _all_jobs()
                              if j["state"] in ("queued", "running")}
@@ -609,7 +627,7 @@ def enqueue(session_id, device_ids, models=None):
         for d in device_ids:
             if int(d) in queued_or_running:
                 continue
-            _append(session_id, d, models)
+            _append(session_id, d, models, extra)
             added.append(int(d))
     if added:
         _wake()

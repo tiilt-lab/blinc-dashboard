@@ -107,6 +107,153 @@ def _idle_recycle_fire():
         logging.info('No clients for {0}s - exiting to reclaim analysis memory (systemd restarts the service).'.format(IDLE_RECYCLE_SECONDS))
         reactor.stop()
 
+# ---- GPU decode for the analytics feed (DC_VIDEO_HWDEC) --------------------
+# BYOD video arrives as VP9 WebM (640x480 @ 20 fps) or fragmented mp4 (h264).
+# The box's ffmpeg 4.4 has the cuvid decoders (vp9/vp8/h264/hevc/av1_cuvid)
+# for the Quadro RTX 8000, so the per-pod decode - the libvpx line item in
+# the ~3 cores a pod costs - can leave the CPU. The output is unchanged: the
+# same rgb24 rawvideo frames, same size and count (verified against the
+# software line on a synthetic VP9 webm), so the reader and the detectors
+# never know which decoder ran. A pod whose hardware ffmpeg exits non-zero
+# within HWDEC_FALLBACK_SECONDS is decoded in software from then on.
+CUVID_DECODERS = {
+    'vp9': 'vp9_cuvid', 'vp8': 'vp8_cuvid', 'h264': 'h264_cuvid',
+    'hevc': 'hevc_cuvid', 'av1': 'av1_cuvid',
+}
+# Codec to assume when ffprobe reports none: what MediaRecorder produces for
+# each container the client can send.
+CONTAINER_DEFAULT_CODEC = {'webm': 'vp9', 'mp4': 'h264'}
+HWDEC_FALLBACK_SECONDS = 5.0
+
+
+def hwdec_default(env_value, nvidia_smi_ok):
+    """Pure. DC_VIDEO_HWDEC=1/0 decides; unset -> on iff nvidia-smi succeeds.
+    nvidia_smi_ok may be a callable, consulted only when the variable is
+    unset, so the probe stays lazy."""
+    if env_value is not None and env_value.strip() != '':
+        return env_value.strip().lower() in ('1', 'true', 'yes', 'on')
+    ok = nvidia_smi_ok() if callable(nvidia_smi_ok) else nvidia_smi_ok
+    return bool(ok)
+
+
+def _nvidia_smi_ok():
+    try:
+        return subprocess.run(['nvidia-smi', '-L'], stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, timeout=15).returncode == 0
+    except Exception:
+        return False
+
+
+def cuvid_decoder(codec, container=None):
+    """Pure. The cuvid decoder for a probed codec name, falling back to the
+    container's usual codec when the probe gave none; None = no GPU decoder
+    for it (the software path is used)."""
+    codec = (codec or '').strip().lower()
+    if not codec:
+        codec = CONTAINER_DEFAULT_CODEC.get((container or '').strip().lower(), '')
+    return CUVID_DECODERS.get(codec)
+
+
+def pod_label(auth_key):
+    """Metrics label for a pod: the session_device id that prefixes its
+    processing key ("<id>-<uuid>"), never the key itself."""
+    head = str(auth_key or '').split('-', 1)[0]
+    return head if head.isdigit() else (str(auth_key) if auth_key else 'unknown')[:12]
+
+
+HWDEC_ENABLED = hwdec_default(os.environ.get('DC_VIDEO_HWDEC'), _nvidia_smi_ok)
+
+
+# ---- Prometheus exporter ----------------------------------------------------
+# Self-contained on purpose (the shared metrics wrapper may not exist in this
+# checkout): prometheus_client is optional and every method is a no-op
+# without it. Served on 127.0.0.1:9112 by default (DC_VIDEO_METRICS_ADDR /
+# DC_VIDEO_METRICS_PORT), scraped by the observability stack.
+try:
+    import prometheus_client as _prom
+except Exception:  # optional dependency
+    _prom = None
+
+METRICS_ADDR = os.environ.get('DC_VIDEO_METRICS_ADDR', '127.0.0.1')
+METRICS_PORT = int(os.environ.get('DC_VIDEO_METRICS_PORT', '9112'))
+METRICS_SAMPLE_SECONDS = 5
+
+
+class VideoMetrics:
+    """blinc_video_pods, blinc_video_batches_dropped_total and
+    blinc_video_decode_mode{pod} (0=software, 1=cuda)."""
+
+    MODE_VALUES = {'software': 0, 'cuda': 1}
+
+    def __init__(self, registry=None):
+        self.enabled = _prom is not None
+        self.served = False
+        if not self.enabled:
+            return
+        self.registry = registry or _prom.REGISTRY
+        self.pods = _prom.Gauge(
+            'blinc_video_pods', 'Live video pods connected', registry=self.registry)
+        self.batches_dropped = _prom.Gauge(
+            'blinc_video_batches_dropped_total',
+            'Frame batches evicted unprocessed across all pods since the service started',
+            registry=self.registry)
+        self.decode_mode = _prom.Gauge(
+            'blinc_video_decode_mode', 'Analytics decoder per pod: 0=software, 1=cuda',
+            ['pod'], registry=self.registry)
+
+    def serve(self, port=METRICS_PORT, addr=METRICS_ADDR):
+        if not self.enabled:
+            logging.info('prometheus_client not installed; video metrics exporter off')
+            return False
+        try:
+            _prom.start_http_server(int(port), addr=addr, registry=self.registry)
+        except Exception as e:
+            logging.warning('video metrics exporter could not bind %s:%s: %s', addr, port, e)
+            return False
+        self.served = True
+        logging.info('video metrics exporter on http://%s:%s/metrics', addr, port)
+        return True
+
+    def set_decode_mode(self, pod, mode):
+        if self.enabled and mode in self.MODE_VALUES:
+            self.decode_mode.labels(pod=str(pod)).set(self.MODE_VALUES[mode])
+
+    def clear_pod(self, pod):
+        if self.enabled:
+            try:
+                self.decode_mode.remove(str(pod))
+            except KeyError:
+                pass
+
+    def sample(self, pods, batches_dropped):
+        if self.enabled:
+            self.pods.set(pods)
+            self.batches_dropped.set(batches_dropped)
+
+
+metrics = VideoMetrics()
+# Drop counts of pods whose per-pod queues were evicted at disconnect, so the
+# total stays monotonic across pods coming and going.
+_dropped_retired = {'batches': 0}
+
+
+def _batches_dropped_total():
+    live = 0
+    try:
+        for q in list(image_object_detection.frame_queue_manager.values()):
+            live += int(getattr(q, 'dropped', 0) or 0)
+    except Exception:
+        pass
+    return _dropped_retired['batches'] + live
+
+
+def _metrics_sample():
+    try:
+        metrics.sample(cm.get_number_of_connections(), _batches_dropped_total())
+    except Exception as e:
+        logging.debug('video metrics sample failed: %s', e)
+
+
 class StreamingChunkDecoder:
     """Incremental analytics decoder.
 
@@ -126,6 +273,12 @@ class StreamingChunkDecoder:
     A pod's recorder can restart mid-connection (client watchdog): the
     new stream opens with a fresh container header (EBML magic for webm,
     ftyp for mp4), which we detect and answer with a fresh ffmpeg.
+
+    The ffmpeg decodes on the GPU (cuvid, see HWDEC_ENABLED) or in
+    software; decode_mode says which for this pod. A hardware ffmpeg that
+    exits non-zero within HWDEC_FALLBACK_SECONDS of its spawn flips the pod
+    to software for good, and the pump restarts from the cached header so
+    the first chunk still reaches analytics.
     """
 
     FPS = 10
@@ -133,6 +286,7 @@ class StreamingChunkDecoder:
     # Decoder thread cap (audit B.3): libvpx/dav1d otherwise start a thread
     # per core for EVERY pod; two keep up with a 10 fps analytics feed.
     DECODE_THREADS = 2
+    HWDEC_FALLBACK_SECONDS = HWDEC_FALLBACK_SECONDS
     # Optional height cap for the analytics feed (0 = native). Left OFF on
     # purpose: the head/object detectors letterbox to 640 px and would not
     # care, but face recognition crops each face from the NATIVE frame and
@@ -153,10 +307,41 @@ class StreamingChunkDecoder:
         w = int(round(width * max_height / float(height)))
         return max(2, w - (w % 2)), int(max_height)
 
-    def __init__(self, interval, sink, label):
+    @staticmethod
+    def _hw_filters(mode):
+        """Pure. Filters the cuda path needs between the fps sampler and the
+        rgb24 conversion: cuvid frames stay on the device (-hwaccel_output_format
+        cuda) through fps, so only the kept frames cross PCIe; hwdownload
+        gives NV12 and, per ffmpeg-filters(1), wants a format filter right
+        after it. swscale then converts NV12 -> rgb24 for -pix_fmt."""
+        return ',hwdownload,format=nv12' if mode == 'cuda' else ''
+
+    @staticmethod
+    def _ffmpeg_argv(mode, decoder, vf, threads):
+        """Pure. The analytics ffmpeg: container stream on stdin, rgb24
+        rawvideo on stdout. mode 'cuda' decodes with the given cuvid decoder
+        on NVDEC; anything else is the software line (unchanged)."""
+        argv = ['ffmpeg', '-v', 'error']
+        if mode == 'cuda':
+            argv += ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda', '-c:v', decoder]
+        else:
+            # -threads is an INPUT option (before -i) so it governs the decoder.
+            argv += ['-threads', str(threads)]
+        argv += ['-i', 'pipe:0', '-vf', vf, '-pix_fmt', 'rgb24', '-f', 'rawvideo', 'pipe:1']
+        return argv
+
+    def __init__(self, interval, sink, label, container=None, hwdec=None):
         self.interval = interval
         self.sink = sink            # callable(iterable of (ts, frame))
         self.label = label
+        self.container = container  # 'webm' | 'mp4': codec fallback for the probe
+        self.hwdec = HWDEC_ENABLED if hwdec is None else bool(hwdec)
+        self.hw_failed = False      # sticky: this pod decodes in software from now on
+        self.respawn_wanted = False  # set by the reader; the pump acts on it
+        self.decode_mode = None     # 'cuda' | 'software' once ffmpeg runs
+        self.codec = None
+        self.spawned_at = None
+        self.last_stderr = b''
         self.feed_queue = queue.Queue(maxsize=self.FEED_QUEUE_BLOBS)
         self.dead = False
         self.proc = None
@@ -191,6 +376,7 @@ class StreamingChunkDecoder:
 
     def stop(self):
         self.dead = True
+        metrics.clear_pod(pod_label(self.label))
         try:
             self.feed_queue.put_nowait(None)
         except Full:
@@ -207,75 +393,130 @@ class StreamingChunkDecoder:
                 is_header = self._is_header(blob)
                 if is_header:
                     self.init_blob = blob
-                if self.proc is None or is_header:
-                    # After a pipe break, respawn from the CACHED init
-                    # segment: the client only ever sends the header once per
-                    # recorder start, so "wait for the next header" meant
-                    # dead analytics for the rest of the session, plus one
-                    # doomed ffprobe against a mid-stream cluster per chunk.
-                    header = blob if is_header else self.init_blob
-                    if header is None or not self._respawn(header):
+                if self.proc is None or is_header or self.respawn_wanted:
+                    # After a pipe break (or the hardware decoder's early
+                    # exit) respawn from the CACHED init segment: the client
+                    # only ever sends the header once per recorder start, so
+                    # "wait for the next header" meant dead analytics for the
+                    # rest of the session, plus one doomed ffprobe against a
+                    # mid-stream cluster per chunk.
+                    if not self._restart(blob if is_header else self.init_blob,
+                                         replay_header=not is_header):
                         continue
-                    if not is_header:
-                        try:
-                            self.proc.stdin.write(header)
-                        except Exception:
-                            self._kill_proc()
-                            continue
-                try:
-                    self.proc.stdin.write(blob)
-                except Exception as e:
-                    logging.warning(
-                        'analytics decoder pipe broke for %s (%s) - '
-                        'will restart from the cached header on the next blob',
-                        self.label, e)
-                    self._kill_proc()
+                if self._write(blob) or is_header or self.dead:
+                    continue
+                # The pipe broke under this blob: one immediate retry on a
+                # fresh decoder (software, if the hardware one just failed)
+                # so the chunk still reaches analytics instead of being lost
+                # until the next one arrives.
+                if self._restart(self.init_blob, replay_header=True):
+                    self._write(blob)
         finally:
             self._kill_proc()
 
+    def _restart(self, header, replay_header):
+        self.respawn_wanted = False
+        if header is None or not self._respawn(header):
+            return False
+        return not replay_header or self._write(header)
+
+    def _write(self, blob):
+        try:
+            self.proc.stdin.write(blob)
+            return True
+        except Exception as e:
+            logging.warning(
+                'analytics decoder pipe broke for %s (%s%s) - restarting from '
+                'the cached header', self.label, e, self._stderr_tail())
+            self._kill_proc()
+            return False
+
     def _respawn(self, header_blob):
         self._kill_proc()
-        dims = self._probe_dims(header_blob)
-        if not dims:
+        probe = self._probe_stream(header_blob)
+        if not probe:
             logging.warning(
                 'analytics decoder could not probe dimensions for %s - '
                 'skipping until the next header', self.label)
             return False
+        dims, self.codec = probe[:2], probe[2]
         self.width, self.height = self._analytics_dims(dims[0], dims[1], self.ANALYTICS_MAX_HEIGHT)
+        mode, decoder = 'software', None
+        if self.hwdec and not self.hw_failed:
+            decoder = cuvid_decoder(self.codec, self.container)
+            if decoder:
+                mode = 'cuda'
+            else:
+                logging.info('no cuvid decoder for codec %r (%s) - software decode for %s',
+                             self.codec, self.container, self.label)
+        vf = 'fps={0}'.format(self.FPS) + self._hw_filters(mode)
         # Explicit scale dims (not ffmpeg's -2 auto width) so the rawvideo
         # reader's frame size is computed here, not guessed from its rounding.
-        vf = 'fps={0}'.format(self.FPS)
         if (self.width, self.height) != tuple(dims):
             vf += ',scale={0}:{1}'.format(self.width, self.height)
-        self.proc = subprocess.Popen(
-            ['ffmpeg', '-v', 'error', '-threads', str(self.DECODE_THREADS),
-             '-i', 'pipe:0', '-vf', vf, '-pix_fmt', 'rgb24',
-             '-f', 'rawvideo', 'pipe:1'],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL)
+        argv = self._ffmpeg_argv(mode, decoder, vf, self.DECODE_THREADS)
+        try:
+            # stderr is drained to a small ring (see _drain_stderr): with
+            # DEVNULL a failing hardware decoder left no trace of why.
+            self.proc = subprocess.Popen(
+                argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE)
+        except Exception as e:
+            logging.error('could not start the analytics ffmpeg for %s: %s', self.label, e)
+            self.proc = None
+            return False
+        self.decode_mode = mode
+        self.spawned_at = time.monotonic()
+        self.last_stderr = b''
+        threading.Thread(
+            target=self._drain_stderr, args=(self.proc,),
+            name='chunkerr-' + self.label[:12], daemon=True).start()
         self.reader = threading.Thread(
-            target=self._read_frames, args=(self.proc, self.width, self.height),
+            target=self._read_frames,
+            args=(self.proc, self.width, self.height, mode, self.spawned_at),
             name='chunkrd-' + self.label[:12], daemon=True)
         self.reader.start()
-        logging.info('analytics decoder started for %s (%dx%d)',
-                     self.label, self.width, self.height)
+        metrics.set_decode_mode(pod_label(self.label), mode)
+        logging.info('analytics decoder started for %s (%dx%d, codec %s, %s decode): %s',
+                     self.label, self.width, self.height, self.codec, mode, ' '.join(argv))
         return True
 
-    def _probe_dims(self, header_blob):
+    def _probe_stream(self, header_blob):
+        # (width, height, codec_name or None) of the first video stream.
+        # ffprobe prints the fields in its own order (codec_name before the
+        # dimensions), so the ints are taken positionally and the codec is
+        # whatever else is left.
         try:
             out = subprocess.run(
                 ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
-                 '-show_entries', 'stream=width,height', '-of', 'csv=p=0',
+                 '-show_entries', 'stream=codec_name,width,height', '-of', 'csv=p=0',
                  'pipe:0'],
                 input=header_blob, capture_output=True, timeout=10)
-            w, h = out.stdout.decode().strip().split(',')[:2]
-            w, h = int(w), int(h)
-            return (w, h) if w > 0 and h > 0 else None
+            fields = [f.strip() for f in out.stdout.decode().strip().splitlines()[0].split(',')]
+            nums = [int(f) for f in fields if f.isdigit()]
+            names = [f for f in fields if f and not f.isdigit()]
+            w, h = nums[:2]
+            return (w, h, names[0] if names else None) if w > 0 and h > 0 else None
         except Exception:
             return None
 
+    def _drain_stderr(self, proc):
+        # Keeps the last ~2 KB of ffmpeg's -v error output for the fallback
+        # and pipe-break log lines; also stops ffmpeg from blocking on a full
+        # stderr pipe.
+        try:
+            for line in iter(proc.stderr.readline, b''):
+                self.last_stderr = (self.last_stderr + line)[-2048:]
+        except Exception:
+            pass
+
+    def _stderr_tail(self):
+        tail = self.last_stderr.decode('utf-8', 'replace').strip()
+        return ': ' + tail[-300:].replace('\n', ' | ') if tail else ''
+
     def _kill_proc(self):
         p, self.proc = self.proc, None
+        reader, self.reader = self.reader, None
         if p is not None:
             try:
                 p.stdin.close()
@@ -291,8 +532,34 @@ class StreamingChunkDecoder:
                     p.wait(timeout=2)
                 except Exception:
                     pass
+        if reader is not None and reader is not threading.current_thread():
+            # The reader's epilogue decides hw_failed from the exit code; wait
+            # for it so the next spawn already knows which decoder to use.
+            reader.join(timeout=5)
 
-    def _read_frames(self, proc, width, height):
+    def _note_exit(self, proc, mode, spawned_at):
+        """Reader-thread epilogue. A hardware ffmpeg that exits non-zero within
+        HWDEC_FALLBACK_SECONDS of its spawn (NVDEC unavailable, unsupported
+        profile, out of decode surfaces) marks the pod software-only and asks
+        the pump to respawn from the cached header, replaying it so the first
+        chunk is not lost. Signals (rc < 0) are our own kills, not failures."""
+        try:
+            rc = proc.wait(timeout=5)
+        except Exception:
+            rc = None
+        elapsed = time.monotonic() - spawned_at
+        if mode != 'cuda' or self.dead or rc is None or rc <= 0:
+            return
+        if elapsed >= self.HWDEC_FALLBACK_SECONDS:
+            return
+        self.hw_failed = True
+        self.respawn_wanted = True
+        logging.warning(
+            'hardware decode failed for %s %.1fs after start (ffmpeg exit %s%s) - '
+            'falling back to software decode for this pod',
+            self.label, elapsed, rc, self._stderr_tail())
+
+    def _read_frames(self, proc, width, height, mode='software', spawned_at=None):
         frame_bytes = width * height * 3
         batch_frames = self.interval * self.FPS
         SENTINEL = object()
@@ -355,6 +622,7 @@ class StreamingChunkDecoder:
             # consumer blocked forever and wedging teardown.
             if batch_q is not None:
                 force_sentinel(batch_q)
+            self._note_exit(proc, mode, spawned_at or time.monotonic())
 
 
 cartoon_model = VideoCartoonifyLoader()
@@ -589,6 +857,16 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
                 self.live_analytics = bool(data.get('liveAnalytics', True))
                 if not self.live_analytics:
                     logging.info('Live analytics disabled by join form for {0} (record-only)'.format(self.config.auth_key))
+                # Session-level "record now, analyse later" (session.live_video_
+                # analytics, carried in the Redis session config the API wrote
+                # at creation): the record-only branch below runs - VidRecorder
+                # only, no StreamingChunkDecoder (no ffmpeg) and no
+                # VideoProcessor (no GPU models); the API queues the post-hoc
+                # video leg for each recorded pod when the session ends.
+                if not getattr(self.config, 'live_video_analytics', True):
+                    self.live_analytics = False
+                    logging.info('Session %s records video without live analytics; pod %s is record-only (post-hoc video queued at session end)',
+                                 self.config.sessionId, self.config.auth_key)
 
                 if(data['numSpeakers'] != 0):
                     self.facial_embeddings = dict()
@@ -615,7 +893,7 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
                         # starved the reactor (see StreamingChunkDecoder).
                         self.chunk_decoder = StreamingChunkDecoder(
                             self.interval, self.enqueue_latest_video_chunk,
-                            self.config.auth_key)
+                            self.config.auth_key, container=self.config.mimeExtension)
                         if cf.video_cartoonize():
                             logging.warning(
                                 'cartoonify audio sidecar is not produced by '
@@ -725,6 +1003,12 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
                     pass
             return False
     
+    @property
+    def decode_mode(self):
+        # 'cuda' | 'software' while the analytics ffmpeg runs; None for a
+        # record-only pod or before the first chunk (blinc_video_decode_mode).
+        return self.chunk_decoder.decode_mode if self.chunk_decoder is not None else None
+
     def send_json(self, message):
         # The one sanctioned transport-write path (reactor-safe, best-effort).
         # This was a raw sendMessage — unsafe from the analytics/callback
@@ -786,7 +1070,9 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
             key = self.config.auth_key
 
             def _evict(_result=None):
-                image_object_detection.frame_queue_manager.pop(key, None)
+                gone = image_object_detection.frame_queue_manager.pop(key, None)
+                if gone is not None:
+                    _dropped_retired['batches'] += int(getattr(gone, 'dropped', 0) or 0)
                 image_object_detection.accumulator_queue_manager.pop(key, None)
 
             if stopping is not None:
@@ -849,6 +1135,12 @@ if __name__ == '__main__':
     auth_connections.start(5.0)
     throughput_gauge = task.LoopingCall(_throughput_gauge)
     throughput_gauge.start(GAUGE_SECONDS, now=False)
+    logging.info('analytics decode: %s (DC_VIDEO_HWDEC=%r; unset = on when nvidia-smi succeeds)',
+                 'cuda (cuvid) with per-pod software fallback' if HWDEC_ENABLED else 'software',
+                 os.environ.get('DC_VIDEO_HWDEC'))
+    metrics.serve()
+    metrics_sampler = task.LoopingCall(_metrics_sample)
+    metrics_sampler.start(METRICS_SAMPLE_SECONDS, now=False)
     factory = WebSocketServerFactory()
     # Keepalive + payload cap (audit B.6): without pings a dead peer held its
     # ffmpeg and threads until the 300 s inactivity sweep.

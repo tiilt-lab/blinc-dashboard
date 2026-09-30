@@ -18,6 +18,7 @@ TABLES = os.path.join(ROOT, "src", "server", "tables")
 
 RECONCILE = "1f2e3d4c5b6a"
 CASCADES = "2a3b4c5d6e7f"
+LIVE_VIDEO = "3b4c5d6e7f80"  # session.live_video_analytics (record now, analyse later)
 
 
 def _read(*parts):
@@ -68,13 +69,14 @@ def test_single_root_and_single_head():
     assert roots == ["d7cd8fa96963"], "expected one root, got %s" % roots
     referenced = {d for downs, _ in revs.values() for d in downs}
     heads = sorted(set(revs) - referenced)
-    assert heads == [CASCADES], "chain must have exactly one head: %s" % heads
+    assert heads == [LIVE_VIDEO], "chain must have exactly one head: %s" % heads
 
 
 def test_phase2_migrations_are_chained_after_phase1():
     revs = _revisions()
     assert revs[RECONCILE][0] == ("f8ae4e72c79c",)
     assert revs[CASCADES][0] == (RECONCILE,)
+    assert revs[LIVE_VIDEO][0] == (CASCADES,)
 
 
 def _version_source(rev):
