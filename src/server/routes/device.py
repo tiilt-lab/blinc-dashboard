@@ -1,5 +1,5 @@
 from flask import Blueprint, request
-from device_websockets import ConnectionManager
+from device_commands import ConnectionManager
 from utility import string_to_bool, sanitize, json_response
 from tables.device import Device
 import database

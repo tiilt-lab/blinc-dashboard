@@ -22,21 +22,32 @@ import authz
 import socketio_helper
 import posthoc_state
 import posthoc_queue
+import redis_sync
 import csv
 import io
 import os
 import base64
-import queue
 import time
 
 # Below this much free disk, new sessions are refused (see create_session).
 MIN_FREE_DISK_FRACTION = 0.10
 
 api_routes = Blueprint('session', __name__)
-image_queue_dict = {}
+
+# Live cartoonized-frame preview: the video processor POSTs frames, a browser
+# streams them. Producer and consumer can hit different gunicorn workers, so
+# each key is a Redis list ``image_queue:<source>_<session>_<device>`` capped
+# at 120 frames (a 1080p JPEG is under 1 MiB base64, so at most ~100 MiB per
+# key) that expires 10 min after the last push when nobody drains it.
+_IMAGE_QUEUE_PREFIX = 'image_queue:'
+_IMAGE_QUEUE_CAP = 120
+_IMAGE_QUEUE_TTL = 10 * 60
+
 # Serializes synthesized-report writes: concurrent anonymous GETs both saw
-# "no report yet" and each inserted a row.
-_synthesis_write_lock = threading.Lock()
+# "no report yet" and each inserted a row. Cross-worker SET NX EX lock
+# ``synthesis_lock:<session>``; the block is two DB statements.
+_SYNTHESIS_LOCK_TTL = 60
+_SYNTHESIS_LOCK_WAIT = 30
 
 
 # A pod named in a URL must belong to the session the caller was authorized
@@ -332,8 +343,12 @@ def _evict_video_cache(cache_dir, incoming_bytes):
         logging.warning('video cache eviction failed: %s', e)
 
 
-_remux_locks = {}
-_remux_locks_guard = threading.Lock()
+# Per-device remux/transcode lock across workers: ``remux_lock:<device>``
+# (SET NX EX). The TTL outlives the longest ffmpeg step (the 3600 s transcode;
+# plain remuxes are 300 s) so a worker killed mid-ffmpeg frees the device;
+# a waiter gives up after _REMUX_LOCK_WAIT and serves what exists.
+_REMUX_LOCK_TTL = 3900
+_REMUX_LOCK_WAIT = 600
 
 
 def _is_full_range_vp9(path):
@@ -408,12 +423,18 @@ def _fixed_video_path(session_device_id):
     # fall through and regenerate both.
     if os.path.exists(fixed) and (len(originals) == 1 or os.path.exists(seg_json)):
         return fixed
-    with _remux_locks_guard:
-        lock = _remux_locks.setdefault(session_device_id, threading.Lock())
-    with lock:
+    with redis_sync.lock('remux_lock:%d' % int(session_device_id),
+                         _REMUX_LOCK_TTL, _REMUX_LOCK_WAIT) as held:
         # a concurrent request already produced it (same condition as above)
         if os.path.exists(fixed) and (len(originals) == 1 or os.path.exists(seg_json)):
             return fixed
+        if not held:
+            # Another worker is still remuxing this device after the full
+            # wait; serve the raw first segment rather than start a second
+            # ffmpeg on the same output.
+            logging.warning('remux for device %s still locked after %ss; serving the original',
+                            session_device_id, _REMUX_LOCK_WAIT)
+            return originals[0]
         _evict_video_cache(cache_dir, total_bytes)
         tmp = '{0}.tmp{1}'.format(fixed, ext)
         seg_files = []
@@ -1503,7 +1524,8 @@ def getSynthesizedFeedbackMetrics(session_id,session_device_id, **kwargs):
     combine_metric_level = synthesized_transcript_video_metrics_by_window(transcriptSpeakerMetric,videoMetrics,session_device,keywords,windowsize=10)
 
     combine_metric_dump = json.dumps(combine_metric_level)
-    with _synthesis_write_lock:
+    with redis_sync.lock('synthesis_lock:%d' % int(session_id),
+                         _SYNTHESIS_LOCK_TTL, _SYNTHESIS_LOCK_WAIT):
         # Re-read under the lock: two concurrent GETs both saw "no report"
         # and each added a row, duplicating reports forever after.
         existing_synthesis = database.get_synthesized_feedback_report(sessionId=session_id, sessionDeviceId = session_device_id)
@@ -1542,22 +1564,13 @@ def add_cartoonized_image(**kwargs):
     logging.info('Received cartoonized image ...')
     content = request.get_json()
     queue_key = '{0}_{1}_{2}'.format(content['source'],content['sessionid'],content['deviceid'])
-    # setdefault is atomic (the old check-then-set lost a frame batch when two
-    # POSTs raced), and the queue is bounded: if no browser ever opens the
-    # stream, base64 frames otherwise accumulate for the process lifetime.
-    # When full, drop the oldest frame — the stream is a live preview.
-    image_queue = image_queue_dict.setdefault(queue_key, queue.Queue(maxsize=120))
+    # Bounded: when full the oldest frame is dropped (the stream is a live
+    # preview), and an unwatched key expires instead of accumulating.
     try:
-        image_queue.put_nowait(content)
-    except queue.Full:
-        try:
-            image_queue.get_nowait()
-        except queue.Empty:
-            pass
-        try:
-            image_queue.put_nowait(content)
-        except queue.Full:
-            pass
+        redis_sync.capped_push(_IMAGE_QUEUE_PREFIX + queue_key, content['image'],
+                               _IMAGE_QUEUE_CAP, _IMAGE_QUEUE_TTL)
+    except Exception as e:
+        logging.warning('cartoonized frame for %s dropped: %s', queue_key, e)
     return json_response()
 
 @api_routes.route('/api/v1/sessions/<int:session_id>/devices/<int:device_id>/auth/<auth_id>/streamimages')
@@ -1577,30 +1590,33 @@ def stream_cartonized_images(session_id, device_id,auth_id, **kwargs):
 
 
 def gen(loading_frame,queue_key):
+    key = _IMAGE_QUEUE_PREFIX + queue_key
+    r = redis_sync.client()
     try:
         started = False
         while True:
-            image_queue = image_queue_dict.get(queue_key)
             if not started:
-                if image_queue is not None and image_queue.qsize() >= 1:
+                if r.llen(key) >= 1:
                     started = True
                     continue
                 yield (b'--frame\r\n'
                         b'Content-Type: image/png\r\n\r\n' + loading_frame + b'\r\n')
                 time.sleep(0.2)
             else:
-                # Block instead of spinning; a drained queue no longer pegs a
-                # core while the client stays connected.
-                try:
-                    data = image_queue.get(timeout=1)
-                except queue.Empty:
+                # BRPOP blocks instead of spinning; the tail is the oldest
+                # frame, so the preview plays in order.
+                item = r.brpop(key, timeout=1)
+                if item is None:
                     continue
                 yield (b'--frame\r\n'
-                b'Content-Type: image/png\r\n\r\n' +  base64.b64decode(data['image']) + b'\r\n')
+                b'Content-Type: image/png\r\n\r\n' +  base64.b64decode(item[1]) + b'\r\n')
     finally:
-        # Client gone (GeneratorExit lands here): drop the queue so
-        # image_queue_dict does not grow forever across sessions.
-        image_queue_dict.pop(queue_key, None)
+        # Client gone (GeneratorExit lands here): drop the frames so the
+        # list does not outlive its viewer (the TTL is the backstop).
+        try:
+            r.delete(key)
+        except Exception:
+            pass
 
 def read_image(filepath):
     with open(filepath, 'rb') as f:

@@ -15,7 +15,8 @@ EnvironmentFile=-/etc/blinc/secrets.env
 Environment="DC_PORT=5001"
 Environment="DC_DEVICE_WS_PORT=9011"
 WorkingDirectory=/home/vlj9405/code/chemistry-dashboard/
-# gunicorn gthread, 1 worker x 200 threads (src/server/gunicorn.conf.py). -c is
+# gunicorn gthread, DC_API_WORKERS (3) workers x 64 threads
+# (src/server/gunicorn.conf.py); the singletons run in blinc-coordinator.service. -c is
 # resolved against WorkingDirectory; --chdir src/server puts the server package
 # at sys.path[0] exactly as running discussion_capture.py as a script did.
 # DC_PORT above is read by gunicorn.conf.py (bind=127.0.0.1:$DC_PORT).

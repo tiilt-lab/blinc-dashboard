@@ -6,18 +6,21 @@ from google import genai
 from dotenv import load_dotenv
 from utility import json_response, build_prompt
 import wrappers
+import redis_sync
 import os
-import threading
 import time
 import numpy as np
 
 api_routes = Blueprint('llmquery', __name__)
 
-# A generation can hold a Werkzeug worker for minutes (Ollama timeout is
+# A generation can hold a request thread for minutes (Ollama timeout is
 # 600s), and two of these endpoints are anonymous by design — without a cap a
-# handful of concurrent requests pins the whole threaded pool and every other
+# handful of concurrent requests pins the whole thread pool and every other
 # route stalls. Excess requests get a clean 429 instead of a hung server.
-_LLM_SLOTS = threading.BoundedSemaphore(int(os.getenv("LLM_MAX_CONCURRENT", "3")))
+# The cap spans every gunicorn worker: a Redis counter (``llm_slots``) whose
+# 660 s TTL outlives the 600 s call, so a slot a killed worker never released
+# frees itself; a local semaphore takes over if Redis is unreachable.
+_LLM_SLOTS = redis_sync.Slots("llm_slots", int(os.getenv("LLM_MAX_CONCURRENT", "3")), 660)
 
 
 class _LLMBusy(Exception):
@@ -116,7 +119,8 @@ def _pick_local_model():
 def call_llm(prompt):
     """Local first (best available model from OLLAMA_MODELS), Gemini
     fallback. Every reflection/Q&A/summary goes through here."""
-    if not _LLM_SLOTS.acquire(blocking=False):
+    slot = _LLM_SLOTS.acquire()
+    if slot is None:
         raise _LLMBusy()
     try:
         model = _pick_local_model()
@@ -128,7 +132,7 @@ def call_llm(prompt):
                                 model, e)
         return call_gemini_with_retry(prompt)
     finally:
-        _LLM_SLOTS.release()
+        _LLM_SLOTS.release(slot)
 
 
 def _llm_error_response(e):

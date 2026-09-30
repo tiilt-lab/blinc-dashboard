@@ -3,7 +3,7 @@
 database.py and routes/callback.py both do `from app import ...`; a stub `app`
 module (Flask + Flask-SQLAlchemy on sqlite://) stands in, so the real helpers
 and the real callback route bodies run against a throwaway schema. The heavy
-neighbours of callback.py (wrappers, config, posthoc_state, device_websockets,
+neighbours of callback.py (wrappers, config, posthoc_state, device_commands,
 handlers.callback_handlers) are replaced by inert stubs. Skipped where Flask is
 not installed (CI), like the other server-side tests.
 
@@ -74,7 +74,7 @@ def env():
     _stub_module("config")
     _stub_module("posthoc_state")
     send_command = _Recorder()
-    _stub_module("device_websockets", ConnectionManager=types.SimpleNamespace(
+    _stub_module("device_commands", ConnectionManager=types.SimpleNamespace(
         instance=types.SimpleNamespace(send_command=send_command)))
     handlers = _stub_module("handlers")
     handlers.callback_handlers = _stub_module("handlers.callback_handlers")

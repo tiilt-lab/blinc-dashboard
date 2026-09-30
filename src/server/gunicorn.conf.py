@@ -15,11 +15,13 @@ chdir = os.path.dirname(os.path.abspath(__file__))
 # loopback only. The unit sets DC_PORT=5001; the dev default stays 5000.
 bind = '127.0.0.1:%s' % os.environ.get('DC_PORT', '5000')
 
-# Exactly one worker. The app keeps live state in process memory — the device
-# ConnectionManager and its Twisted reactor, watchers._last_watched, the
-# image_queue_dict and _remux_locks in routes/session.py, the APScheduler job —
-# and a second worker would see none of it (and nginx has no ip_hash).
-workers = 1
+# DC_API_WORKERS interchangeable workers (default 3). Nothing live is
+# process-local any more: the device ConnectionManager, the APScheduler job
+# and the post-hoc runner run in the coordinator (coordinator.py); watchers,
+# last-connect times, LLM slots, remux/synthesis locks and the image queues
+# are in Redis; Socket.IO is websocket-only over a Redis message queue, so a
+# session never has to land on the same worker twice.
+workers = int(os.environ.get('DC_API_WORKERS', '3'))
 
 # Plain OS threads, no monkey patching: the same process runs a Twisted
 # reactor (device websocket server) and torch/ML code, which eventlet/gevent
@@ -29,19 +31,20 @@ worker_class = 'gthread'
 
 # One thread per in-flight request. Every Socket.IO WebSocket pins a thread
 # for its whole life (simple-websocket runs the connection inside the WSGI
-# call) and every 25 s long-poll pins one until it returns, so this must cover
-# all connected browser tabs plus the real request concurrency.
-threads = 200
+# call), so workers x threads must cover all connected browser tabs plus the
+# real request concurrency: 3 x 64 = 192 concurrent, the single worker's 200
+# of before spread over three processes (and three GILs).
+threads = 64
 
 # For gthread `timeout` is NOT a request timeout. The worker's main loop
 # heartbeats (notify()) at least once a second on its own thread; the arbiter
 # kills the worker (SIGABRT, then SIGKILL) only if that heartbeat stops for
 # this many seconds, i.e. when the whole process is wedged (deadlock, GIL held
 # by a C call, OOM thrash). Request threads running a 600–900 s LLM/ffmpeg
-# call (nginx's proxy_read_timeout ceiling) are untouched. Killing the single
-# worker drops every websocket and all the in-process state above, so the
-# value is generous: a healthy worker is never killed, a truly dead one is
-# replaced within 15 min.
+# call (nginx's proxy_read_timeout ceiling) are untouched. Killing a worker
+# drops its websockets (clients reconnect to another), so the value is
+# generous: a healthy worker is never killed, a truly dead one is replaced
+# within 15 min.
 timeout = 900
 
 # On SIGTERM the worker stops accepting and gives in-flight requests this
@@ -65,8 +68,8 @@ capture_output = True
 # Heartbeat file on tmpfs, so a stalled disk cannot look like a dead worker.
 worker_tmp_dir = '/dev/shm'
 
-# Never recycle the worker (0 = off): it holds the device connections, the
-# live socket.io rooms, the image queues and the remux locks.
+# Never recycle workers (0 = off): each holds live socket.io connections and
+# a recycle would drop them all at once for nothing.
 max_requests = 0
 max_requests_jitter = 0
 

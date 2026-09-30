@@ -20,6 +20,9 @@ if _COMMON not in sys.path:
 import reactor_safety
 
 class ConnectionManager:
+    # Lives in the coordinator process only (DC_ROLE=coordinator/all). Routes
+    # and handlers import device_commands.ConnectionManager, which reaches
+    # this instance directly there and over Redis from the API workers.
     instance = None
 
     def __init__(self):
@@ -82,6 +85,12 @@ class ConnectionManager:
             match['socket'].send_json(command)
             return True
         return False
+
+    def is_connected(self, device_id):
+        # Lets the coordinator answer "not connected" at once instead of
+        # waiting out a Job timeout for a pod that is not even here.
+        with self._lock:
+            return any(conn['id'] == device_id for conn in self.connections)
 
     def update_job(self, job_id, response):
         job = self.jobs.get(job_id, None)

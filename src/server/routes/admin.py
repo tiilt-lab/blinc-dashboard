@@ -5,7 +5,7 @@ from app import base_dir
 import logging
 import database
 import wrappers
-from device_websockets import ConnectionManager
+from device_commands import ConnectionManager
 from io import BytesIO
 import base64
 import os

@@ -130,16 +130,18 @@ def test_scheduler_and_boot_tasks_have_env_kill_switches():
 
 # --- gunicorn.conf.py -------------------------------------------------------
 
-def test_gunicorn_conf_is_single_gthread_worker(monkeypatch):
+def test_gunicorn_conf_is_multi_worker_gthread(monkeypatch):
+    # Multi-worker step: 3 x 64 (tests/test_multiworker.py has the rest).
+    monkeypatch.delenv("DC_API_WORKERS", raising=False)
     conf = _load_conf(monkeypatch, port=5123)
     assert conf.bind == "127.0.0.1:5123"
-    assert conf.workers == 1
+    assert conf.workers == 3
     assert conf.worker_class == "gthread"
-    assert conf.threads >= 100          # websockets + 25 s long-polls each pin one
+    assert conf.threads == 64 and conf.workers * conf.threads >= 150   # websockets each pin one
     assert conf.timeout >= 900          # heartbeat, must exceed nginx's 600-900 s
     assert conf.graceful_timeout == 30
     assert conf.keepalive == 5
-    assert conf.max_requests == 0       # in-process state must survive
+    assert conf.max_requests == 0       # live websockets must survive
     assert conf.max_requests_jitter == 0
     assert conf.worker_tmp_dir == "/dev/shm"
     assert conf.accesslog is None       # nginx has the access log

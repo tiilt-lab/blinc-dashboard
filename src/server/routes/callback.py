@@ -1,6 +1,6 @@
 from app import socketio
 from flask import Blueprint, request
-from device_websockets import ConnectionManager
+from device_commands import ConnectionManager
 import utility
 from utility import json_response
 import logging
@@ -11,6 +11,7 @@ import config as cf
 import requests
 from handlers import callback_handlers
 import posthoc_state
+import redis_sync
 from datetime import datetime, timezone
 
 api_routes = Blueprint('callback', __name__)
@@ -18,9 +19,34 @@ api_routes = Blueprint('callback', __name__)
 # Latest connect time per session_device id. The processors replay failed
 # callbacks with backoff for up to 10 minutes, so a 'disconnect' can land
 # after the same pod has already reconnected; one older than the latest
-# connect must not flip a live pod offline. Process-local: after a restart
-# the check simply does not apply and the callback behaves as before.
+# connect must not flip a live pod offline. Connect and disconnect can land
+# on different gunicorn workers, so the stamp is in Redis
+# (``device_last_connect:<session_device_id>``, ISO time, 24 h TTL); the dict
+# is the fallback when Redis is unreachable, i.e. the old per-process check.
+_LAST_CONNECT_PREFIX = 'device_last_connect:'
+_LAST_CONNECT_TTL = 24 * 3600
 _last_connect_time = {}
+
+
+def _last_connect(session_device_id):
+    try:
+        value = redis_sync.client().get(_LAST_CONNECT_PREFIX + str(session_device_id))
+        if value is not None:
+            return datetime.fromisoformat(value.decode() if isinstance(value, bytes) else value)
+    except Exception as e:
+        logging.debug('last-connect read failed (%s); local only', e)
+    return _last_connect_time.get(session_device_id)
+
+
+def _note_connect(session_device_id, event_time):
+    previous = _last_connect(session_device_id)
+    latest = event_time if previous is None else max(previous, event_time)
+    try:
+        redis_sync.client().set(_LAST_CONNECT_PREFIX + str(session_device_id),
+                                latest.isoformat(), ex=_LAST_CONNECT_TTL)
+    except Exception as e:
+        logging.debug('last-connect write failed (%s); local only', e)
+        _last_connect_time[session_device_id] = latest
 
 
 def _event_time(content):
@@ -57,8 +83,7 @@ def device_connected(**kwargs):
   if session_device:
     event_time = _event_time(content)
     if event_time is not None:
-      previous = _last_connect_time.get(session_device.id)
-      _last_connect_time[session_device.id] = event_time if previous is None else max(previous, event_time)
+      _note_connect(session_device.id, event_time)
     session_device.connected = True
     database.save_changes()
     room_name = str(session_device.session_id)
@@ -81,7 +106,7 @@ def device_disconnected(**kwargs):
   # Update websockets
   if session_device:
     event_time = _event_time(content)
-    last_connect = _last_connect_time.get(session_device.id)
+    last_connect = _last_connect(session_device.id)
     if (session_device.connected and event_time is not None
             and last_connect is not None and event_time < last_connect):
       logging.info('Ignoring stale disconnect for session device %d (%s predates connect at %s).',

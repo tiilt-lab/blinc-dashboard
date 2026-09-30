@@ -19,6 +19,10 @@ import types
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src", "server"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from fake_redis import FakeRedis  # noqa: E402
+import redis_sync  # noqa: E402
 
 sys.modules.setdefault('posthoc_state',
                        types.SimpleNamespace(is_running=lambda d: False))
@@ -42,8 +46,9 @@ def _import_queue():
 @pytest.fixture
 def q(tmp_path, monkeypatch):
     mod = _import_queue()
-    # Redirect persistence BEFORE any mutation (the default may be a real file).
-    monkeypatch.setattr(mod, "_state_file", lambda: str(tmp_path / "posthoc_queue.json"))
+    # Queue state is in Redis (multi-worker step): a fake per test.
+    fake = FakeRedis()
+    monkeypatch.setattr(redis_sync, "_client", fake)
     monkeypatch.setattr(mod, "_maybe_recycle_audio_service", lambda: None)
     monkeypatch.setattr(mod, "_job_base", lambda job: {"sessionid": job["session_id"],
                                                         "sessiondeviceid": job["device_id"]})
@@ -56,9 +61,8 @@ def q(tmp_path, monkeypatch):
     monkeypatch.setattr(mod.time, "sleep", lambda s: sleeps.append(s))
     cancels = []
     monkeypatch.setattr(mod, "_cancel", lambda url, d: cancels.append((url, d)) or 1)
-    mod._jobs[:] = []
     mod._worker = None
-    mod._test = types.SimpleNamespace(tickets=tickets, sleeps=sleeps, cancels=cancels)
+    mod._test = types.SimpleNamespace(tickets=tickets, sleeps=sleeps, cancels=cancels, fake=fake)
     return mod
 
 
@@ -98,7 +102,7 @@ def test_gpu_busy_at_initialize_defers_to_the_front_and_retries(q, monkeypatch, 
     svc = Services(q, [q._GpuBusy(5), None, None]).install(monkeypatch)
     q.enqueue(1, [10])
     q._worker_loop()
-    job = q._jobs[0]
+    job = q._all_jobs()[0]
     assert job["state"] == "done" and job["error"] is None
     assert job["deferrals"] == 1
     assert q._test.sleeps == [5.0]
@@ -116,7 +120,7 @@ def test_gpu_busy_mid_run_is_deferred_the_same_way_and_logged_once(q, monkeypatc
     svc = Services(q, [q._GpuBusy(120), q._GpuBusy(900), None, None]).install(monkeypatch)
     q.enqueue(1, [10])
     q._worker_loop()
-    job = q._jobs[0]
+    job = q._all_jobs()[0]
     assert job["state"] == "done" and job["deferrals"] == 2
     assert q._test.sleeps == [120.0, 300.0]           # capped at 300 s
     assert [e[1] for e in svc.log if e[0] == "trigger"] == ["audio", "audio", "audio", "video"]
@@ -130,8 +134,8 @@ def test_deferred_job_keeps_its_place_ahead_of_later_jobs(q, monkeypatch):
     q._worker_loop()
     devices = [e[2] for e in svc.log if e[0] == "trigger"]
     assert devices == [10, 10, 10, 11, 11]
-    assert [j["state"] for j in q._jobs] == ["done", "done"]
-    assert [j["device_id"] for j in q._jobs] == [10, 11]
+    assert [j["state"] for j in q._all_jobs()] == ["done", "done"]
+    assert [j["device_id"] for j in q._all_jobs()] == [10, 11]
 
 
 def test_video_busy_after_audio_done_does_not_rerun_audio(q, monkeypatch):
@@ -140,9 +144,8 @@ def test_video_busy_after_audio_done_does_not_rerun_audio(q, monkeypatch):
     q._worker_loop()
     scopes = [e[1] for e in svc.log if e[0] == "trigger"]
     assert scopes == ["audio", "video", "video"]
-    assert q._jobs[0]["state"] == "done" and q._test.sleeps == [7.0]
-    on_disk = json.loads(open(q._state_file()).read())
-    assert on_disk[0]["done_legs"] == ["audio", "video"]
+    assert q._all_jobs()[0]["state"] == "done" and q._test.sleeps == [7.0]
+    assert q._all_jobs()[0]["done_legs"] == ["audio", "video"]   # persisted in Redis
 
 
 def test_retry_after_is_capped_and_defaulted():
@@ -164,7 +167,7 @@ def test_idle_queue_holds_while_live_pods_stream_and_logs_once(q, monkeypatch, c
     q.enqueue(1, [10])
     q._worker_loop()
     assert q._test.sleeps == [30, 30, 30]             # three 30 s waits
-    assert q._jobs[0]["state"] == "done"
+    assert q._all_jobs()[0]["state"] == "done"
     holds = [r for r in caplog.records if "holding queued jobs" in r.getMessage()]
     assert len(holds) == 1 and "2 live pod(s)" in holds[0].getMessage()
     assert len([r for r in caplog.records if "no live pods; resuming" in r.getMessage()]) == 1
@@ -203,7 +206,7 @@ def test_jobs_cleared_during_a_hold_are_not_started(q, monkeypatch):
     svc = Services(q).install(monkeypatch)
     q.enqueue(1, [10])
     q._worker_loop()
-    assert svc.log == [] and q._jobs == []
+    assert svc.log == [] and q._all_jobs() == []
 
 
 # ---- sequencing, tickets, cancel -------------------------------------------
@@ -224,7 +227,7 @@ def test_giving_up_on_a_leg_cancels_it_at_the_service(q, monkeypatch):
     svc = Services(q, [q._LegTimeout("audio")]).install(monkeypatch)
     q.enqueue(1, [10])
     q._worker_loop()
-    job = q._jobs[0]
+    job = q._all_jobs()[0]
     assert job["state"] == "error" and "timed out" in job["error"]
     assert q._test.cancels == [(q.AUDIO_WS, 10)]
     assert [e[1] for e in svc.log if e[0] == "trigger"] == ["audio"]  # video never started
@@ -258,14 +261,14 @@ def test_one_errored_leg_is_a_warning_both_is_a_failure(q, monkeypatch):
     Services(q, ["audio down", None]).install(monkeypatch)
     q.enqueue(1, [10])
     q._worker_loop()
-    assert q._jobs[0]["state"] == "done" and q._jobs[0]["done_legs"] == ["video"]
+    assert q._all_jobs()[0]["state"] == "done" and q._all_jobs()[0]["done_legs"] == ["video"]
 
-    q._jobs[:] = []
+    q._test.fake.flushall()
     Services(q, ["audio down", "video down"]).install(monkeypatch)
     q.enqueue(1, [11])
     q._worker_loop()
-    assert q._jobs[0]["state"] == "error"
-    assert q._jobs[0]["error"] == "audio: audio down / video: video down"
+    assert q._all_jobs()[0]["state"] == "error"
+    assert q._all_jobs()[0]["error"] == "audio: audio down / video: video down"
 
 
 def test_empty_audio_output_is_an_error_even_when_video_would_follow(q, monkeypatch):
@@ -273,7 +276,7 @@ def test_empty_audio_output_is_an_error_even_when_video_would_follow(q, monkeypa
     monkeypatch.setattr(q, "_audio_produced_output", lambda d: False)
     q.enqueue(1, [10])
     q._worker_loop()
-    assert q._jobs[0]["state"] == "error" and "no transcripts" in q._jobs[0]["error"]
+    assert q._all_jobs()[0]["state"] == "error" and "no transcripts" in q._all_jobs()[0]["error"]
     assert [e[1] for e in svc.log if e[0] == "trigger"] == ["audio"]
 
 

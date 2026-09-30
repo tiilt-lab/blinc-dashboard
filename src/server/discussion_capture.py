@@ -5,13 +5,22 @@ Two ways to serve it:
 * development: ``python src/server/discussion_capture.py`` runs threaded
   Werkzeug through Flask-SocketIO, exactly as it always has (``main()``).
 * production: gunicorn loads ``wsgi:app`` (src/server/wsgi.py), which calls
-  ``create_app()`` here. Settings live in src/server/gunicorn.conf.py.
+  ``create_app()`` here, several workers at once (src/server/gunicorn.conf.py),
+  and one coordinator process (src/server/coordinator.py) holds everything
+  that must exist exactly once.
 
-Everything with a side effect (blueprint registration, the authz wiring, the
-device connected-flag reset, the session-timeout job, the video-cache pre-warm
-and the Twisted device-websocket thread) runs inside ``create_app()`` behind a
-once-per-process guard, so importing this module is inert and the app is
-initialised exactly once whichever runner loads it.
+Everything with a side effect runs inside ``create_app()`` behind a
+once-per-process guard, so importing this module is inert. What runs is
+decided by the role (``create_app(role)`` or ``DC_ROLE``, default ``api``):
+
+* ``api``          blueprints + authz only — a stateless gunicorn worker;
+                   device commands go to the coordinator over Redis
+                   (device_commands.py).
+* ``coordinator``  the rest, no HTTP: the device connected-flag reset, the
+                   session-timeout job, the video-cache pre-warm, the Twisted
+                   device-websocket thread with its Redis command subscriber,
+                   and the post-hoc queue runner.
+* ``all``          both in one process — the dev runner (``main()``).
 
 Environment knobs, for a second instance that shares this config.ini/DB
 (a probe or a staging copy beside production):
@@ -20,11 +29,15 @@ Environment knobs, for a second instance that shares this config.ini/DB
   (it would otherwise end sessions it cannot see being watched).
 * ``DC_SKIP_BOOT_TASKS=1`` — skip the one-shot boot mutations: the
   ``device.connected = False`` reset and the ffmpeg video-cache pre-warm.
+* ``DC_DISABLE_POSTHOC_QUEUE=1`` — do not migrate the queue snapshot or run
+  queued post-hoc jobs.
 """
 from app import app, socketio, scheduler
 import scheduled_tasks
 import config as cf
 import device_websockets
+import device_commands
+import posthoc_queue
 import os
 import logging
 import threading
@@ -59,9 +72,22 @@ from routes import socket as _socket_handlers  # noqa: F401
 _init_lock = threading.Lock()
 _initialised = False
 
+# Roles that run the single-instance services (see the module docstring).
+COORDINATOR_ROLES = ('coordinator', 'all')
+ROLES = ('api',) + COORDINATOR_ROLES
+
 
 def _env_flag(name):
     return os.environ.get(name, '').strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def _resolve_role(role):
+    role = (role or os.environ.get('DC_ROLE') or 'api').strip().lower()
+    if role not in ROLES:
+        raise ValueError('DC_ROLE must be one of %s, not %r' % (', '.join(ROLES), role))
+    # device_commands reads it back to pick the Twisted manager or the proxy.
+    os.environ['DC_ROLE'] = role
+    return role
 
 
 def _register_blueprints():
@@ -100,6 +126,8 @@ def _configure_authz():
 
 
 def _start_background_services():
+    # Coordinator only (COORDINATOR_ROLES): every service here must run in
+    # exactly one process, so no gunicorn worker ever enters this function.
     skip_boot_tasks = _env_flag('DC_SKIP_BOOT_TASKS')
 
     if skip_boot_tasks:
@@ -130,29 +158,43 @@ def _start_background_services():
         prewarm_video_cache()
 
     device_websockets.run_server()
+    # Routes in the API workers publish device commands to Redis; forward
+    # them to the live pod sockets from here.
+    device_commands.CommandSubscriber(device_websockets.ConnectionManager.instance).start()
+
+    if _env_flag('DC_DISABLE_POSTHOC_QUEUE'):
+        logging.warning('DC_DISABLE_POSTHOC_QUEUE set: post-hoc queue not migrated or run')
+    else:
+        posthoc_queue.migrate_state_file()
+        posthoc_queue.start_runner()
 
 
-def create_app():
-    """Return the fully initialised Flask app.
+def create_app(role=None):
+    """Return the fully initialised Flask app for ``role`` (default DC_ROLE,
+    then ``api``).
 
     Safe to call any number of times; the side effects run exactly once per
     process. The guard flag is set BEFORE the work so that a boot failure (DB
     down during the device reset, device-websocket port taken) can never lead
     to a second attempt double-registering blueprints — the exception
-    propagates and ends the process, which is what both the dev runner and
-    gunicorn's arbiter (which respawns the worker) expect.
+    propagates and ends the process, which is what the dev runner, the
+    coordinator unit and gunicorn's arbiter (which respawns the worker) expect.
     """
     global _initialised
+    role = _resolve_role(role)
     with _init_lock:
         if not _initialised:
             _initialised = True
             _register_blueprints()
             _configure_authz()
-            _start_background_services()
+            if role in COORDINATOR_ROLES:
+                _start_background_services()
     return app
 
 
 def main():
+    # The dev runner is still one process doing everything.
+    os.environ.setdefault('DC_ROLE', 'all')
     create_app()
     logging.info('Discussion Capture Server running...')
     # Development runner. Threaded Werkzeug behind nginx was fine at this

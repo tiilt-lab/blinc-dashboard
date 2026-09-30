@@ -8,6 +8,9 @@ trigger with ``{"type":"error","code":"gpu_busy","retry_after":N}`` (no GPU
 lease, or a live class is on) is not a failure: the job goes back to the
 front of the queue and is retried after N seconds (capped). A leg the queue
 gives up on is cancelled at the service so it stops holding the GPU.
+
+The queue itself is in Redis (keys below); the API workers enqueue, report
+and clear, and only the coordinator process runs jobs (start_runner).
 """
 
 import os
@@ -16,8 +19,11 @@ import time
 import logging
 import threading
 import asyncio
+import contextlib
+import uuid
 
 import posthoc_state
+import redis_sync
 
 # Loopback on purpose: the services now bind 127.0.0.1 only.
 AUDIO_WS = "ws://127.0.0.1:%s" % os.getenv("DC_AUDIO_POSTHOC_WS_PORT", "9015")
@@ -46,15 +52,119 @@ class _GpuBusy(Exception):
         super().__init__("GPU busy, retry in %.0fs" % self.retry_after)
 
 
+# State lives in Redis so the gunicorn API workers (enqueue/status/clear) and
+# the coordinator (the one runner, coordinator.py) see one queue:
+#   posthoc_queue:jobs      list of job ids, head = next to run
+#   posthoc_queue:job:<id>  hash, one JSON-encoded value per job field
+#   posthoc_queue:seq       INCR source of job ids
+#   posthoc_queue:lock      SET NX EX mutation lock across processes
+#   posthoc_queue:wake      list the runner BRPOPs on while idle; enqueue pushes
+# The JSON snapshot the single-process server kept is read once by
+# migrate_state_file() at coordinator start and then renamed .migrated.
+_KEY_JOBS = "posthoc_queue:jobs"
+_KEY_JOB = "posthoc_queue:job:%s"
+_KEY_SEQ = "posthoc_queue:seq"
+_KEY_LOCK = "posthoc_queue:lock"
+_KEY_WAKE = "posthoc_queue:wake"
+_LOCK_TTL = 10
+_IDLE_WAIT = 30  # the runner re-scans this often even if a wake was lost
+
 _lock = threading.Lock()
-_jobs = []  # {session_id, device_id, state: queued|running|done|error, error}
 _worker = None
 
-# The queue survives Flask restarts: every mutation snapshots to disk, and
-# import-time restore re-queues whatever was pending (a job caught mid-run
-# is re-queued too — post-hoc runs are idempotent, so re-running beats
-# guessing whether the interrupted run finished). This retires the manual
-# snapshot-restart-re-enqueue routine restarts used to require.
+
+def _r():
+    return redis_sync.client()
+
+
+@contextlib.contextmanager
+def _mutation():
+    # In-process threads serialise on _lock; processes on the Redis lock. A
+    # lock held past its TTL (holder died) simply expires.
+    with _lock:
+        r = _r()
+        token = uuid.uuid4().hex
+        deadline = time.monotonic() + 2 * _LOCK_TTL
+        while not r.set(_KEY_LOCK, token, nx=True, ex=_LOCK_TTL):
+            if time.monotonic() > deadline:
+                logging.warning("posthoc queue: mutation lock held too long; proceeding")
+                break
+            time.sleep(0.05)
+        try:
+            yield
+        finally:
+            try:
+                if r.get(_KEY_LOCK) == token:
+                    r.delete(_KEY_LOCK)
+            except Exception:
+                pass
+
+
+def _encode(job):
+    return {k: json.dumps(v) for k, v in job.items()}
+
+
+def _decode(raw):
+    return {k: json.loads(v) for k, v in raw.items()}
+
+
+def _save(job):
+    # A job dict without an id (a bare _run_job call) is not persisted.
+    if job.get("id") is None:
+        return
+    _r().hset(_KEY_JOB % job["id"], mapping=_encode(job))
+
+
+def _load(job_id):
+    raw = _r().hgetall(_KEY_JOB % job_id)
+    return _decode(raw) if raw else None
+
+
+def _all_jobs():
+    # Queue order; an id whose hash is gone (manual cleanup) is dropped.
+    r = _r()
+    jobs = []
+    for job_id in r.lrange(_KEY_JOBS, 0, -1):
+        job = _load(job_id)
+        if job is None:
+            r.lrem(_KEY_JOBS, 0, job_id)
+        else:
+            jobs.append(job)
+    return jobs
+
+
+def _next_queued():
+    return next((j for j in _all_jobs() if j["state"] == "queued"), None)
+
+
+def _remove(job):
+    r = _r()
+    r.lrem(_KEY_JOBS, 0, job["id"])
+    r.delete(_KEY_JOB % job["id"])
+
+
+def _append(session_id, device_id, models, extra=None):
+    r = _r()
+    job = {"id": int(r.incr(_KEY_SEQ)), "session_id": int(session_id),
+           "device_id": int(device_id), "state": "queued", "models": models,
+           "error": None, "queued_at": time.time(),
+           "started_at": None, "finished_at": None}
+    job.update(extra or {})
+    _save(job)
+    r.rpush(_KEY_JOBS, job["id"])
+    return job
+
+
+def _wake():
+    try:
+        pipe = _r().pipeline()
+        pipe.rpush(_KEY_WAKE, "1")
+        pipe.ltrim(_KEY_WAKE, -10, -1)  # tokens pile up only while no runner drains them
+        pipe.execute()
+    except Exception as e:
+        logging.warning("posthoc queue: wake failed (%s); the runner re-scans within %ss", e, _IDLE_WAIT)
+
+
 def _state_file():
     try:
         import config as cf
@@ -69,41 +179,51 @@ def _state_file():
                         "posthoc_queue.json")
 
 
-def _persist_locked():
-    path = _state_file()
-    tmp = path + ".tmp"
-    try:
-        with open(tmp, "w") as f:
-            json.dump(_jobs, f)
-        os.replace(tmp, path)
-    except Exception as e:
-        logging.warning("posthoc queue: persist failed: %s", e)
-
-
-def _restore():
-    global _worker
+def migrate_state_file():
+    """Coordinator start, once: pending jobs from the pre-Redis JSON snapshot
+    (a job caught mid-run is re-queued — runs are idempotent) go into Redis,
+    then the file is renamed .migrated so it is never replayed."""
     path = _state_file()
     try:
         with open(path) as f:
             jobs = json.load(f)
     except FileNotFoundError:
-        return
+        return 0
     except Exception as e:
-        logging.warning("posthoc queue: restore failed: %s", e)
-        return
-    with _lock:
+        logging.warning("posthoc queue: could not read %s for migration: %s", path, e)
+        return 0
+    n = 0
+    with _mutation():
+        present = {j["device_id"] for j in _all_jobs() if j["state"] in ("queued", "running")}
         for j in jobs:
-            if j.get("state") == "running":
-                j["state"] = "queued"
-        _jobs[:] = jobs
-        pending = sum(1 for j in _jobs if j["state"] == "queued")
-        if pending and (_worker is None or not _worker.is_alive()):
-            _worker = threading.Thread(target=_worker_loop,
-                                       name="posthoc-queue", daemon=True)
-            _worker.start()
-    if pending:
-        logging.info("posthoc queue: restored %d pending job(s) after restart",
-                     pending)
+            if j.get("state") in ("queued", "running") and int(j["device_id"]) not in present:
+                _append(j["session_id"], j["device_id"], j.get("models"),
+                        {"done_legs": j.get("done_legs") or []})
+                present.add(int(j["device_id"]))
+                n += 1
+    try:
+        os.replace(path, path + ".migrated")
+    except Exception as e:
+        logging.warning("posthoc queue: could not rename %s: %s", path, e)
+    if n:
+        _wake()
+        logging.info("posthoc queue: migrated %d pending job(s) from %s", n, path)
+    return n
+
+
+def _requeue_running():
+    # The runner died mid-job (coordinator restart): run it again rather
+    # than guess whether the interrupted run finished.
+    with _mutation():
+        n = 0
+        for job in _all_jobs():
+            if job["state"] == "running":
+                job["state"] = "queued"
+                _save(job)
+                n += 1
+    if n:
+        logging.info("posthoc queue: re-queued %d job(s) interrupted by a restart", n)
+    return n
 
 
 def _busy_from(msg):
@@ -336,8 +456,7 @@ def _run_job(job):
         if scope == "audio" and not _audio_produced_output(device_id):
             raise RuntimeError("audio produced no transcripts (empty recording or transcription failure)")
         done.append(scope)
-        with _lock:
-            _persist_locked()
+        _save(job)
     if attempted and len(errors) == len(attempted):
         raise RuntimeError(" / ".join("%s: %s" % (s, errors[s]) for s in attempted))
 
@@ -401,29 +520,24 @@ def _maybe_recycle_audio_service():
 
 
 def _worker_loop():
-    global _worker
+    """Run queued jobs until none is left, then return (coordinator only;
+    _run_forever wraps this and sleeps on the wake list)."""
     while True:
-        with _lock:
-            if not any(j["state"] == "queued" for j in _jobs):
-                # Clear _worker UNDER the lock as we exit. Otherwise a job
-                # enqueued in the window between this return and the thread
-                # actually dying saw is_alive()==True, no replacement worker
-                # was started, and the job sat "queued" forever. Now the exit
-                # decision and enqueue's liveness check are serialized.
-                _worker = None
-                return
+        with _mutation():
+            job = _next_queued()
+        if job is None:
+            return
         # A live class is on: hold here rather than have the service refuse
         # us every retry_after. Re-pick under the lock afterwards — the
         # queue may have been cleared while we waited.
         _wait_for_class_to_end()
-        with _lock:
-            job = next((j for j in _jobs if j["state"] == "queued"), None)
+        with _mutation():
+            job = _next_queued()
             if job is None:
-                _worker = None
                 return
             job["state"] = "running"
             job["started_at"] = time.time()
-            _persist_locked()
+            _save(job)
         try:
             _maybe_recycle_audio_service()
             _run_job(job)
@@ -431,13 +545,13 @@ def _worker_loop():
         except _GpuBusy as busy:
             # Not a failure: back to the FRONT of the queue, then wait out
             # retry_after before the next attempt. Logged once per job.
-            with _lock:
+            with _mutation():
                 job["state"] = "queued"
                 job["deferrals"] = job.get("deferrals", 0) + 1
-                if job in _jobs:
-                    _jobs.remove(job)
-                _jobs.insert(0, job)
-                _persist_locked()
+                _save(job)
+                r = _r()
+                r.lrem(_KEY_JOBS, 0, job["id"])
+                r.lpush(_KEY_JOBS, job["id"])
             if job["deferrals"] == 1:
                 logging.info("posthoc queue: pod %s deferred (%s); retrying until the GPU is free",
                              job["device_id"], busy)
@@ -449,34 +563,56 @@ def _worker_loop():
         if job.get("deferrals"):
             logging.info("posthoc queue: pod %s %s after %d deferral(s)",
                          job["device_id"], outcome, job["deferrals"])
-        # Terminal transition under the lock so a persisted snapshot can't
-        # capture a torn view (state without finished_at).
-        with _lock:
+        # Terminal transition under the lock so a reader can't see a torn
+        # view (state without finished_at).
+        with _mutation():
             job["state"] = outcome
             job["error"] = err
             job["finished_at"] = time.time()
-            _persist_locked()
+            _save(job)
+
+
+def _run_forever():
+    while True:
+        try:
+            _worker_loop()
+        except Exception:
+            logging.exception("posthoc queue: runner failed; retrying in 10 s")
+            time.sleep(10)
+            continue
+        try:
+            _r().brpop(_KEY_WAKE, timeout=_IDLE_WAIT)
+        except Exception as e:
+            logging.warning("posthoc queue: idle wait failed (%s); sleeping %ss", e, _IDLE_WAIT)
+            time.sleep(_IDLE_WAIT)
+
+
+def start_runner():
+    """Coordinator only: the single runner thread. API workers never call
+    this; they enqueue, read status and clear."""
+    global _worker
+    with _lock:
+        if _worker is not None and _worker.is_alive():
+            return _worker
+    _requeue_running()
+    with _lock:
+        _worker = threading.Thread(target=_run_forever, name="posthoc-queue", daemon=True)
+        _worker.start()
+    return _worker
 
 
 def enqueue(session_id, device_ids, models=None):
-    global _worker
-    with _lock:
-        queued_or_running = {j["device_id"] for j in _jobs
+    with _mutation():
+        queued_or_running = {j["device_id"] for j in _all_jobs()
                              if j["state"] in ("queued", "running")}
         added = []
         for d in device_ids:
             if int(d) in queued_or_running:
                 continue
-            _jobs.append({"session_id": int(session_id), "device_id": int(d),
-                          "state": "queued", "models": models, "error": None,
-                          "queued_at": time.time(),
-                          "started_at": None, "finished_at": None})
+            _append(session_id, d, models)
             added.append(int(d))
-        _persist_locked()
-        if _worker is None or not _worker.is_alive():
-            _worker = threading.Thread(target=_worker_loop,
-                                       name="posthoc-queue", daemon=True)
-            _worker.start()
+    if added:
+        _wake()
     return added
 
 
@@ -485,10 +621,12 @@ def clear_pending():
     # service). Cancelled jobs are REMOVED, not marked error: a stop+requeue
     # cycle used to leave hundreds of phantom "cancelled" errors inflating
     # the queue panel's counts forever.
-    with _lock:
-        n = sum(1 for j in _jobs if j["state"] == "queued")
-        _jobs[:] = [j for j in _jobs if j["state"] != "queued"]
-        _persist_locked()
+    with _mutation():
+        n = 0
+        for job in _all_jobs():
+            if job["state"] == "queued":
+                _remove(job)
+                n += 1
         return n
 
 
@@ -501,25 +639,30 @@ _DONE_LINGER = 5 * 60
 _ERROR_LINGER = 30 * 60
 
 
-def _prune_settled_locked():
-    if not _jobs or any(j["state"] in ("queued", "running") for j in _jobs):
+def _settled_expired(jobs):
+    if not jobs or any(j["state"] in ("queued", "running") for j in jobs):
+        return False
+    last = max((j.get("finished_at") or 0) for j in jobs)
+    linger = _ERROR_LINGER if any(j["state"] == "error" for j in jobs) else _DONE_LINGER
+    return bool(last) and time.time() - last > linger
+
+
+def _prune_settled():
+    # Cheap read first; the lock is only taken when there is something to drop.
+    if not _settled_expired(_all_jobs()):
         return
-    last = max((j.get("finished_at") or 0) for j in _jobs)
-    linger = _ERROR_LINGER if any(j["state"] == "error" for j in _jobs) else _DONE_LINGER
-    if last and time.time() - last > linger:
-        del _jobs[:]
-        _persist_locked()
+    with _mutation():
+        jobs = _all_jobs()
+        if _settled_expired(jobs):
+            for job in jobs:
+                _remove(job)
 
 
 def status(session_id=None):
-    with _lock:
-        _prune_settled_locked()
-        return [{"session_id": j["session_id"], "device_id": j["device_id"],
-                 "state": j["state"], "error": j["error"],
-                 "started_at": j.get("started_at"),
-                 "finished_at": j.get("finished_at")}
-                for j in _jobs
-                if session_id is None or j["session_id"] == int(session_id)]
-
-
-_restore()
+    _prune_settled()
+    return [{"session_id": j["session_id"], "device_id": j["device_id"],
+             "state": j["state"], "error": j["error"],
+             "started_at": j.get("started_at"),
+             "finished_at": j.get("finished_at")}
+            for j in _all_jobs()
+            if session_id is None or j["session_id"] == int(session_id)]

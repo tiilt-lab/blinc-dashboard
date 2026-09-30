@@ -10,11 +10,11 @@ export class SocketService {
   // transcript / video-metric ids so a reconnect replays only what it
   // missed instead of the whole session digest.
   createSocket(endpoint, room = null, joinFields = null) {
-    // WebSocket first, long-polling as the fallback. The client was
-    // polling-first for a while (a server migration had broken the
-    // WebSocket transport); WS works again, and polling-first cost ~4
-    // HTTP round trips per connection before engine.io upgraded.
-    const socket = io(window.location.protocol + '//' + window.location.host + '/' + endpoint, {transports: ['websocket', 'polling']});
+    // WebSocket only, no long-polling fallback: the API runs several
+    // gunicorn workers behind nginx (which upgrades /socket.io), and each
+    // polling request would land on a different worker that does not know
+    // the session. The server refuses polling too (app.py transports).
+    const socket = io(window.location.protocol + '//' + window.location.host + '/' + endpoint, {transports: ['websocket']});
     // A dead feed used to be indistinguishable from a quiet class: every
     // handler was a no-op. Log the lifecycle (warn: the lint config allows
     // only warn/error) so the console tells the story.

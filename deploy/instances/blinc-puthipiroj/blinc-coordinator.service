@@ -1,0 +1,29 @@
+[Unit]
+Description=BLINC Coordinator: device sockets, scheduler, post-hoc queue (blinc.puthipiroj.com)
+After=network-online.target mysql.service redis-server.service
+StartLimitIntervalSec=0
+
+[Service]
+User=vlj9405
+Group=www-data
+Type=simple
+Restart=always
+RestartSec=1
+LimitRTPRIO=99
+LimitRTTIME=infinity
+EnvironmentFile=-/etc/blinc/secrets.env
+Environment="DC_ROLE=coordinator"
+# The pods' websocket port nginx proxies /device_socket to; the API workers
+# no longer bind it. Only this unit may hold it, so start it after the API
+# restart that frees the port (the old single-process API owned it).
+Environment="DC_DEVICE_WS_PORT=9011"
+WorkingDirectory=/home/vlj9405/code/chemistry-dashboard/
+# One process, no HTTP (src/server/coordinator.py). The script's own
+# directory is sys.path[0], so the sibling imports resolve as for the API.
+ExecStart=/home/vlj9405/code/chemistry-dashboard/src/venv-unified/bin/python src/server/coordinator.py
+# SIGTERM stops the reactor, the scheduler and the queue runner; a job in
+# flight is re-queued by the next start (posthoc_queue._requeue_running).
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

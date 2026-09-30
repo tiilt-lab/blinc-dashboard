@@ -4,7 +4,7 @@ import socketio_helper
 from datetime import datetime, timezone
 from app import socketio
 import json
-from device_websockets import ConnectionManager
+from device_commands import ConnectionManager
 from redis_helper import RedisSessions
 
 def create_session(user_id, name, devices, keyword_list_id, topic_model_id, byod, features, doa, folder, asr=None):

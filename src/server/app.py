@@ -74,7 +74,11 @@ limiter = Limiter(get_remote_address, app=app, storage_uri=cf.redis_url())
 # Create SocketIO app (engineio_logger=True for advance debug)
 # threading mode (simple-websocket) replaces deprecated eventlet; the
 # in-process Twisted device-websocket server gets real sockets again.
-socketio = SocketIO(app, async_mode='threading', log=logger, cors_allowed_origins=cf.domains() + ["127.0.0.1:5000", "localhost"], manage_session=False, message_queue=cf.redis_url())
+# websocket-only (forwarded to engineio.Server(transports=...)): with several
+# gunicorn workers a long-polling session's requests would land on different
+# workers and be unknown there; one upgraded socket stays on one worker. The
+# Redis message_queue is what lets any worker emit into any room.
+socketio = SocketIO(app, async_mode='threading', log=logger, cors_allowed_origins=cf.domains() + ["127.0.0.1:5000", "localhost"], manage_session=False, message_queue=cf.redis_url(), transports=['websocket'])
 
 # Create database
 DATABASE_FILE = os.path.dirname(os.path.abspath(__file__)) + '/discussion_capture.db'
