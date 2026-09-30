@@ -20,6 +20,13 @@ and all inference goes through crisper_worker.py subprocesses:
     circuit breaker (SpawnBackoff, 30s -> 300s); a window fails over to
     another slot at once, and the pods are told ASR is degraded only when
     no slot can serve, ok again as soon as a window succeeds.
+    Two throughput levers sit in front of the pool: a voice-activity gate
+    (asr_ingest.SpeechGate, DC_ASR_VAD) drops windows with no speech before
+    they cost a GPU second, and when several windows are waiting for a busy
+    slot the FIFO head takes up to DC_ASR_BATCH of them to the next free
+    worker as ONE request (the worker runs them back to back; per-pod order
+    is untouched because a pod never has two windows in flight).
+    DC_ASR_MODEL picks the worker's model (see live_model).
   - CrisperWhisperPosthocASR: --oneshot on the whole recording in its own
     process (so a long file can never head-of-line-block live captions),
     then emits gap-segmented Google-shaped AsrResults (same contract as
@@ -39,7 +46,7 @@ from collections import deque
 
 from .base_asr import (BaseASR, AsrResult, PosthocFileASR, worker_python,
                        run_json_worker, POSTHOC_WORKER_TIMEOUT)
-from asr_ingest import WindowAssembler  # audio_processing/ is on sys.path
+from asr_ingest import WindowAssembler, make_speech_gate  # audio_processing/ is on sys.path
 
 _WORKER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "crisper_worker.py")
 # Per-slot worker stderr, appended for the life of the service:
@@ -52,6 +59,23 @@ _STDERR_LOG_TEMPLATE = os.path.join(
 
 DEFAULT_MODEL = "nyralabs/CrisperWhisper2.0_large"
 
+# Live worker model: DC_ASR_MODEL overrides config.ini [crisperwhisper] model.
+# The candidate is nyralabs/CrisperWhisper2.0_turbo, a Whisper-turbo-style
+# distillation: the same large encoder with a much shallower decoder, so it
+# trades some accuracy for speed. Expected: several times faster decode per
+# window (the decoder is the serial part) and roughly half the VRAM, against
+# a somewhat higher WER — the verbatim details this model exists for
+# (fillers, stutters, false starts) and word-timestamp precision (fewer
+# cross-attention alignment heads) are what a shallow decoder loses first,
+# and noisy far-field classroom audio suffers most. Measure pause metrics
+# on a real class before switching one over; nothing changes by default.
+MODEL_ENV = "DC_ASR_MODEL"
+
+# Batch: how many waiting windows the FIFO head may take to a free worker as
+# one request. 1 = one window per request (the pre-batching behaviour).
+BATCH_ENV = "DC_ASR_BATCH"
+DEFAULT_BATCH = 4
+
 # Refuse to spawn when the GPU has less than this free: the model needs ~4GB
 # and a spawn that OOMs takes the 180s start timeout under the slot's lock.
 # Checked at every spawn, so a second slot never lands on a full card.
@@ -63,8 +87,10 @@ DEFAULT_WORKERS = 2
 
 # One window's budget: the worker's reply deadline, and also the longest a
 # window waits in the pool's FIFO for a free slot (past it the window is
-# dropped rather than served minutes stale).
+# dropped rather than served minutes stale). A batched request gets
+# BATCH_EXTRA_SECONDS more per additional window.
 REQUEST_TIMEOUT = 120.0
+BATCH_EXTRA_SECONDS = 30.0
 SPAWN_TIMEOUT = 180.0
 
 # "Capacity reached" signal: a window waited longer than CAPACITY_WAIT_SECONDS
@@ -93,6 +119,28 @@ def pool_size(environ=os.environ):
     except ValueError:
         logging.warning("%s=%r is not an integer; using %d", WORKERS_ENV, raw, DEFAULT_WORKERS)
         return DEFAULT_WORKERS
+
+
+def batch_size(environ=os.environ):
+    """DC_ASR_BATCH (default 4, minimum 1)."""
+    raw = environ.get(BATCH_ENV, str(DEFAULT_BATCH))
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        logging.warning("%s=%r is not an integer; using %d", BATCH_ENV, raw, DEFAULT_BATCH)
+        return DEFAULT_BATCH
+
+
+def live_model(environ=os.environ):
+    """The live worker's model id: DC_ASR_MODEL, else config.ini, else DEFAULT_MODEL."""
+    override = (environ.get(MODEL_ENV) or "").strip()
+    if override:
+        return override
+    try:
+        import config as cf
+        return cf.crisperwhisper_model()
+    except Exception:
+        return DEFAULT_MODEL
 
 
 def free_vram_mib(run=subprocess.run):
@@ -254,6 +302,10 @@ class _WorkerSlot(_StatusSource):
         self._last_used = 0.0
         self._reaper_started = False
         self.backoff = SpawnBackoff()
+        # From the worker's ready line: may this worker take the list form
+        # (several windows per request)? False until a worker says so, so an
+        # older worker script keeps getting one window per request.
+        self.batch_capable = False
 
     @property
     def alive(self):
@@ -317,7 +369,7 @@ class _WorkerSlot(_StatusSource):
     def _launch(self):
         """Popen the --serve worker with its stderr appended to this slot's log."""
         import config as cf
-        model = cf.crisperwhisper_model()
+        model = live_model()
         mode = cf.crisperwhisper_mode()
         logging.info("Starting %s (model=%s, mode=%s)", self.name, model, mode)
         err = self._stderr_file()
@@ -348,10 +400,12 @@ class _WorkerSlot(_StatusSource):
                          % (free, MIN_FREE_VRAM_MIB), MSG_LOW_VRAM)
             raise WorkerUnavailable("%s: GPU memory low (%d MiB free)" % (self.name, free))
         ok = False
+        hello = {}
         try:
             self._proc = self._launch()
             ready = self._read_reply(timeout=SPAWN_TIMEOUT)
-            ok = bool(ready) and bool(json.loads(ready).get("ready"))
+            hello = json.loads(ready) if ready else {}
+            ok = isinstance(hello, dict) and bool(hello.get("ready"))
             reason = "worker exited during model load"
         except Exception as e:
             reason = "spawn failed: %s" % e
@@ -359,7 +413,10 @@ class _WorkerSlot(_StatusSource):
             self._kill()
             self._failed(reason, MSG_RESTARTING)
             raise WorkerUnavailable("%s: %s" % (self.name, reason))
-        logging.info("%s ready (pid %s)", self.name, getattr(self._proc, "pid", "?"))
+        self.batch_capable = bool(hello.get("batch"))
+        logging.info("%s ready (pid %s, protocol %s, batch %s)", self.name,
+                     getattr(self._proc, "pid", "?"), hello.get("protocol", 1),
+                     "yes" if self.batch_capable else "no")
         if not self._reaper_started:
             self._reaper_started = True
             threading.Thread(target=self._reap_idle, daemon=True,
@@ -367,6 +424,7 @@ class _WorkerSlot(_StatusSource):
 
     def _kill(self):
         proc, self._proc = self._proc, None
+        self.batch_capable = False
         if proc:
             try:
                 proc.kill()
@@ -408,6 +466,14 @@ class _WorkerSlot(_StatusSource):
             logging.warning("CrisperWhisper warm-up failed: %s", e)
 
     def transcribe(self, wav_path):
+        return self.transcribe_many([wav_path])[0]
+
+    def transcribe_many(self, wav_paths):
+        """Transcribe several windows in one worker call; one result dict per
+        window, in order. On the wire that is one list-form request when the
+        worker advertised batching, else one request per window under the
+        same lock (still no other pod's window can interleave)."""
+        wav_paths = list(wav_paths)
         with self._lock:
             self._last_used = time.time()
             # Raises WorkerUnavailable at once while the breaker is open: the
@@ -415,12 +481,11 @@ class _WorkerSlot(_StatusSource):
             # into a 180s stall for every pod, once per window.
             self._ensure_proc()
             try:
-                self._proc.stdin.write(json.dumps({"audio": wav_path}) + "\n")
-                self._proc.stdin.flush()
-                line = self._read_reply(timeout=REQUEST_TIMEOUT)
-                if not line:
-                    raise RuntimeError("worker closed its pipe")
-                data = json.loads(line)
+                if len(wav_paths) == 1 or not self.batch_capable:
+                    results = [self._request({"audio": path}, REQUEST_TIMEOUT)
+                               for path in wav_paths]
+                else:
+                    results = self._request_batch(wav_paths)
             except Exception as e:
                 self._kill()
                 self._failed("request failed: %s" % e, MSG_UNRESPONSIVE)
@@ -430,7 +495,51 @@ class _WorkerSlot(_StatusSource):
             # then faults on inference must keep growing the backoff).
             self.backoff.record_success()
             self._set_state("ok")
-            return data
+            return results
+
+    def _request(self, job, timeout):
+        self._proc.stdin.write(json.dumps(job) + "\n")
+        self._proc.stdin.flush()
+        line = self._read_reply(timeout=timeout)
+        if not line:
+            raise RuntimeError("worker closed its pipe")
+        return json.loads(line)
+
+    def _request_batch(self, wav_paths):
+        windows = [{"id": i, "audio": path} for i, path in enumerate(wav_paths)]
+        reply = self._request({"windows": windows},
+                              REQUEST_TIMEOUT + BATCH_EXTRA_SECONDS * (len(windows) - 1))
+        results = reply.get("results") if isinstance(reply, dict) else None
+        if results is None:
+            if isinstance(reply, dict) and reply.get("error"):
+                # The worker refused the request as a whole (it is still
+                # healthy): every window gets that error, none is lost silently.
+                return [{"error": reply["error"]} for _ in wav_paths]
+            raise RuntimeError("malformed batch reply: %r" % (reply,))
+        if len(results) != len(wav_paths):
+            raise RuntimeError("batch reply has %d results for %d windows"
+                               % (len(results), len(wav_paths)))
+        return results
+
+
+class _Ticket:
+    """One window waiting in the pool's FIFO.
+
+    The head ticket becomes the *leader*: it takes a slot and may claim the
+    tickets right behind it as *followers* for the same request. A claimed
+    follower leaves the FIFO and waits for the leader to fill in its result
+    (or error); its thread never touches a slot.
+    """
+
+    __slots__ = ("wav_path", "t0", "claimed", "done", "result", "error")
+
+    def __init__(self, wav_path):
+        self.wav_path = wav_path
+        self.t0 = time.monotonic()
+        self.claimed = False
+        self.done = False
+        self.result = None
+        self.error = None
 
 
 class WorkerPool(_StatusSource):
@@ -441,13 +550,20 @@ class WorkerPool(_StatusSource):
     pods, bounded by ``request_timeout``, so arrival order across pods is
     honoured and no pod can hog a slot (each pod's flush thread submits one
     window at a time, so per-pod order is preserved whichever slot serves).
+    Batching: when the head of the FIFO takes a LIVE slot whose worker
+    advertised the list form, it also takes up to ``batch`` - 1 windows
+    waiting behind it, in FIFO order, and the slot sends them as one
+    request; each result goes back to its own pod's thread. A pod has at
+    most one window in flight, so a batch never holds two windows of one
+    pod and per-pod order cannot change. A slot that still has to spawn
+    takes one window (the others may find another slot meanwhile).
     Spawning is lazy: slot 0 starts on the first window; a further slot
     starts only once a window has waited SPAWN_GRACE_SECONDS on busy slots
     (or when no live slot can take it at all), and every spawn re-checks
     free VRAM, so a second ~3-4GB worker never lands on a full card. A slot
-    that refuses (breaker open, spawn refused) hands the window to another
-    slot at once; when no slot can serve, WorkerUnavailable is raised
-    without waiting.
+    that refuses (breaker open, spawn refused) hands the window — batch and
+    all — to another slot at once; when no slot can serve,
+    WorkerUnavailable is raised without waiting.
 
     Status: degraded only when every slot is degraded; ok as soon as any
     slot serves a window. Same add_listener/remove_listener API as before.
@@ -457,9 +573,10 @@ class WorkerPool(_StatusSource):
 
     def __init__(self, size=None, slot_factory=None, request_timeout=REQUEST_TIMEOUT,
                  spawn_grace=None, capacity_wait=CAPACITY_WAIT_SECONDS,
-                 warning_interval=CAPACITY_WARNING_INTERVAL):
+                 warning_interval=CAPACITY_WARNING_INTERVAL, batch=None):
         super().__init__()
         self.size = pool_size() if size is None else max(1, int(size))
+        self.batch = batch_size() if batch is None else max(1, int(batch))
         factory = slot_factory or _WorkerSlot
         self.slots = [factory(i) for i in range(self.size)]
         for slot in self.slots:
@@ -474,6 +591,8 @@ class WorkerPool(_StatusSource):
         self._busy = set()        # slots currently serving (or spawning for) a window
         self._last_capacity_warning = None
         self._max_wait = 0.0      # longest FIFO wait since the last DEBUG line
+        self._requests = 0        # worker requests since the last DEBUG line...
+        self._windows = 0         # ...and the windows they carried
         self._monitor_started = False
 
     # -- status -------------------------------------------------------------
@@ -521,8 +640,10 @@ class WorkerPool(_StatusSource):
             return None
         return spawnable[0]
 
-    def _acquire(self, exclude):
-        ticket = object()
+    def _acquire(self, ticket, exclude, followers):
+        """Wait for a slot as the leader (returned, ``followers`` topped up
+        with the claimed tickets), or, if a leader claimed this ticket, until
+        its result is in (returns None). Caller: transcribe()."""
         t0 = time.monotonic()
         deadline = t0 + self.request_timeout
         with self._cv:
@@ -530,6 +651,13 @@ class WorkerPool(_StatusSource):
             self._waiters.append(ticket)
             try:
                 while True:
+                    if ticket.claimed:
+                        # In a leader's batch: the reply (bounded by the
+                        # slot's request timeout) or the leader's failure
+                        # resolves it; nothing to pick here.
+                        while not ticket.done:
+                            self._cv.wait(1.0)
+                        return None
                     now = time.monotonic()
                     waited = now - t0
                     if self._waiters[0] is ticket:
@@ -537,6 +665,7 @@ class WorkerPool(_StatusSource):
                         if slot is not None:
                             self._busy.add(slot)
                             self._note_wait(waited)
+                            self._claim_followers(slot, followers, now)
                             return slot
                         if not any(self._serviceable(s, exclude) for s in self.slots):
                             # Today's contract: refused at once, never after a wait.
@@ -555,8 +684,36 @@ class WorkerPool(_StatusSource):
                         timeout = min(timeout, self.spawn_grace - waited)
                     self._cv.wait(max(0.0, timeout))
             finally:
-                self._waiters.remove(ticket)
+                if ticket in self._waiters:   # a claimed follower is already out
+                    self._waiters.remove(ticket)
                 self._cv.notify_all()
+
+    def _claim_followers(self, slot, followers, now):
+        # Caller holds _cv and is the head of the FIFO, about to use `slot`.
+        # Only a live worker that speaks the list form gets a batch; a slot
+        # that must spawn first takes one window so the rest stay available
+        # to any other slot that frees up during the ~7s load.
+        if not (slot.alive and slot.batch_capable):
+            return
+        room = self.batch - 1 - len(followers)
+        while room > 0 and len(self._waiters) > 1:
+            follower = self._waiters[1]
+            self._waiters.remove(follower)
+            follower.claimed = True
+            self._note_wait(now - follower.t0)
+            followers.append(follower)
+            room -= 1
+
+    def _resolve(self, followers, results=None, error=None):
+        # Hand each follower its result (or the batch's failure) and wake it.
+        with self._cv:
+            for i, follower in enumerate(followers):
+                if error is not None:
+                    follower.error = type(error)(*error.args)   # its own instance to raise
+                else:
+                    follower.result = results[i]
+                follower.done = True
+            self._cv.notify_all()
 
     def _release(self, slot):
         with self._cv:
@@ -592,11 +749,13 @@ class WorkerPool(_StatusSource):
             time.sleep(60)
             with self._cv:
                 waiting, busy, longest = len(self._waiters), len(self._busy), self._max_wait
+                requests, windows = self._requests, self._windows
                 self._max_wait = 0.0
+                self._requests = self._windows = 0
             alive = sum(1 for s in self.slots if s.alive)
             logging.debug("CrisperWhisper pool: %d waiting, %d/%d slots busy, %d alive, "
-                          "longest wait %.1fs in the last minute",
-                          waiting, busy, self.size, alive, longest)
+                          "longest wait %.1fs, %d windows in %d requests in the last minute",
+                          waiting, busy, self.size, alive, longest, windows, requests)
 
     # -- API ----------------------------------------------------------------
 
@@ -605,19 +764,45 @@ class WorkerPool(_StatusSource):
         self.slots[0].warm()
 
     def transcribe(self, wav_path):
+        """This window's result dict, however it got served: on its own, as
+        the leader of a batch, or inside another pod's batch."""
+        ticket = _Ticket(wav_path)
         tried = set()
-        while True:
-            slot = self._acquire(tried)
-            try:
-                return slot.transcribe(wav_path)
-            except WorkerUnavailable:
-                # Refused before any work (breaker open / spawn refused):
-                # another slot may take this same window.
-                tried.add(slot)
-                if len(tried) >= self.size:
-                    raise
-            finally:
-                self._release(slot)
+        followers = []
+        try:
+            while True:
+                slot = self._acquire(ticket, tried, followers)
+                if slot is None:
+                    break                      # served as a follower
+                paths = [ticket.wav_path] + [f.wav_path for f in followers]
+                try:
+                    results = slot.transcribe_many(paths)
+                except WorkerUnavailable:
+                    # Refused before any work (breaker open / spawn refused):
+                    # another slot may take this same batch.
+                    tried.add(slot)
+                    if len(tried) >= self.size:
+                        raise
+                    continue
+                finally:
+                    self._release(slot)
+                with self._cv:
+                    self._requests += 1
+                    self._windows += len(paths)
+                self._resolve(followers, results=results[1:])
+                followers = []
+                return results[0]
+        except BaseException as e:
+            # Whatever stopped the leader stops its followers the same way
+            # (their threads are waiting in _acquire; never leave them there).
+            if isinstance(e, WorkerUnavailable):
+                self._resolve(followers, error=WorkerUnavailable(str(e)))
+            else:
+                self._resolve(followers, error=RuntimeError("batch request failed: %s" % e))
+            raise
+        if ticket.error is not None:
+            raise ticket.error
+        return ticket.result
 
 
 _pool = WorkerPool()
@@ -633,6 +818,13 @@ class CrisperWhisperASR(BaseASR):
     are transcribed in order whichever slot serves them. Window start times
     come from the chunks' absolute sample offsets (asr_ingest), not from how
     much audio survived the queue, so transcript times match AudioBuffer.
+
+    Before a window goes to the pool the flush thread asks this pod's
+    SpeechGate (asr_ingest; DC_ASR_VAD) whether it holds any speech; a
+    silent window is skipped — counted, reported once a minute, and exposed
+    as ``vad_skip_ratio`` — and the next window keeps its own absolute start,
+    so the timeline never drifts. The gate is built lazily on the flush
+    thread (a Silero session per pod) and any failure in it fails OPEN.
     """
 
     WINDOW_SECONDS = 12.0
@@ -647,6 +839,10 @@ class CrisperWhisperASR(BaseASR):
         # Set by the server: callable(state, message) that tells this pod's
         # client whether ASR is 'ok' or 'degraded'.
         self.on_status = None
+        # Voice-activity gate: built by gate_factory() on the flush thread
+        # (see _transcribing); None means every window is transcribed.
+        self.gate_factory = make_speech_gate
+        self._gate = None
 
     def start(self):
         self.running = True
@@ -703,12 +899,55 @@ class CrisperWhisperASR(BaseASR):
         except queue_module.Full:
             logging.warning("CrisperWhisper: dropped the window at %.1fs", window[0])
 
+    # -- voice-activity gate -------------------------------------------------
+
+    @property
+    def windows_skipped(self):
+        return self._gate.windows_skipped if self._gate is not None else 0
+
+    @property
+    def vad_skip_ratio(self):
+        """Fraction of this pod's windows the gate kept off the GPU (metrics)."""
+        return self._gate.skip_ratio if self._gate is not None else 0.0
+
+    def _build_gate(self):
+        try:
+            self._gate = self.gate_factory()
+        except Exception as e:
+            # No gate is only slower, never wrong: transcribe everything.
+            logging.warning("CrisperWhisper: VAD gate unavailable, transcribing "
+                            "every window: %s", e)
+            self._gate = None
+        else:
+            logging.info("CrisperWhisper: VAD gate %s",
+                         self._gate.name if self._gate is not None else "off")
+
+    def _admit(self, start_seconds, pcm):
+        gate = self._gate
+        if gate is None:
+            return True
+        try:
+            transcribe, text = gate.admit(pcm)
+        except Exception as e:
+            logging.warning("CrisperWhisper: VAD gate (%s) failed, transcribing every "
+                            "window from now on: %s", gate.name, e)
+            self._gate = None
+            return True
+        if text:
+            logging.info("%s", text)
+        if not transcribe:
+            logging.debug("CrisperWhisper: window at %.1fs has no speech; skipped",
+                          start_seconds)
+        return transcribe
+
     def _transcribing(self):
+        self._build_gate()
         while True:
             window = self._window_queue.get()
             if window is None:
                 break
-            self._flush(*window)
+            if self._admit(*window):
+                self._flush(*window)
         self.transcript_queue.put(None)
 
     def _flush(self, start_seconds, pcm):

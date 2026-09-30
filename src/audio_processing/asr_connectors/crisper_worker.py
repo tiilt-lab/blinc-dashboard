@@ -9,16 +9,46 @@ sortformer_cli / qwen3_worker).
 Two modes:
   --oneshot AUDIO OUT.json   transcribe one file, write JSON, exit (post-hoc)
   --serve                    JSON-lines loop on stdin/stdout for the live
-                             connector: {"audio": path} in, one result line
-                             out per job. Prints {"ready": true} after the
-                             model loads. Model loads once (~7s), then ~20x
-                             realtime on GPU.
+                             connector. Prints the ready line after the model
+                             loads, then one reply line per request line.
+                             Model loads once (~7s), then ~20x realtime on
+                             GPU.
 
-Output shape (both modes): {"text": str, "words": [[word, start_s, end_s], ...]}
+--serve protocol (version 2; version 1 requests still work):
+  ready line   {"ready": true, "protocol": 2, "batch": true, "model": ...}
+               "batch" tells the connector it may send the list form.
+  single       {"audio": PATH[, "language":.., "mode":..]}
+               -> {"text": str, "words": [[word, start_s, end_s], ...]}
+                  or {"error": str}
+  list         {"windows": [{"id": ANY, "audio": PATH[, "language", "mode"]}, ...]}
+               -> {"results": [{"id": ANY, "text":.., "words":..} |
+                               {"id": ANY, "error": str}, ...]}
+               one result per window, in request order, each carrying its
+               id; one window's failure is its own error entry and never
+               loses the others.
+  exit         {"exit": true}
+
+Batching note (crisperwhisper 2.0.3, verified in the package source): there
+is no multi-audio batch API. ``CrisperWhisperModel.transcribe()`` takes one
+audio; ``transcribe_dual()`` batches the *modes* (verbatim + intended) of
+ONE audio through the fork's ``generate_dual_greedy`` (shared encoder);
+``CT2Engine.generate_batch()`` / ``extract_features_batch()`` are Python
+loops over single calls; and the word-timestamp path (attention capture,
+hallucination repair, coverage fallback, ``extract_word_timings``) is
+single-row only, so the raw CTranslate2 batched ``Whisper.generate`` cannot
+be used without losing the timings the live path exists for. The list form
+therefore runs its windows sequentially inside this one call: what it saves
+is the per-window pipe round trip and Python turnaround, and it lets the
+connector hand a free worker several waiting windows at once.
 """
 import argparse
 import json
+import os
 import sys
+
+PROTOCOL = 2
+DEFAULT_MODEL = "nyralabs/CrisperWhisper2.0_large"
+MODEL_ENV = "DC_ASR_MODEL"
 
 
 def _load_model(model_id, compute_type):
@@ -37,11 +67,57 @@ def _transcribe(model, audio_path, language, mode):
     return {"text": result.text or "", "words": words}
 
 
+def handle(model, job, language, mode):
+    """One request dict -> one reply dict (single or list form)."""
+    if "windows" in job:
+        results = []
+        for index, window in enumerate(job["windows"]):
+            try:
+                data = _transcribe(
+                    model, window["audio"],
+                    window.get("language", language), window.get("mode", mode),
+                )
+            except Exception as e:  # this window only; the rest still run
+                data = {"error": str(e)}
+            data["id"] = window.get("id", index)
+            results.append(data)
+        return {"results": results}
+    return _transcribe(
+        model, job["audio"], job.get("language", language), job.get("mode", mode)
+    )
+
+
+def ready_line(model_id):
+    return {"ready": True, "protocol": PROTOCOL, "batch": True, "model": model_id}
+
+
+def serve(model, lines, out, language, mode, model_id=None):
+    """The --serve loop over ``lines`` (an iterable of request lines), replies
+    written to ``out``; returns when the input ends or an exit request comes."""
+    out.write(json.dumps(ready_line(model_id)) + "\n")
+    out.flush()
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            job = json.loads(line)
+            if job.get("exit"):
+                break
+            data = handle(model, job, language, mode)
+        except Exception as e:  # one bad request must not kill the loop
+            data = {"error": str(e)}
+        out.write(json.dumps(data) + "\n")
+        out.flush()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--oneshot", nargs=2, metavar=("AUDIO", "OUT"))
     parser.add_argument("--serve", action="store_true")
-    parser.add_argument("--model", default="nyralabs/CrisperWhisper2.0_large")
+    # The connector passes --model explicitly (DC_ASR_MODEL, else config.ini);
+    # the env default here only covers a hand-started worker.
+    parser.add_argument("--model", default=os.environ.get(MODEL_ENV) or DEFAULT_MODEL)
     parser.add_argument("--mode", default="verbatim")
     parser.add_argument("--language", default="en")
     parser.add_argument("--compute-type", default="float16")
@@ -57,24 +133,7 @@ def main():
         return
 
     if args.serve:
-        print(json.dumps({"ready": True}), flush=True)
-        for line in sys.stdin:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                job = json.loads(line)
-                if job.get("exit"):
-                    break
-                data = _transcribe(
-                    model,
-                    job["audio"],
-                    job.get("language", args.language),
-                    job.get("mode", args.mode),
-                )
-            except Exception as e:  # one bad window must not kill the loop
-                data = {"error": str(e)}
-            print(json.dumps(data), flush=True)
+        serve(model, sys.stdin, sys.stdout, args.language, args.mode, model_id=args.model)
 
 
 if __name__ == "__main__":
