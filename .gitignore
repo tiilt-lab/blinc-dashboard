@@ -278,3 +278,6 @@ development_data.zip
 *.log
 src/video_processing/video_cartoonizer/checkpoint/
 src/audio_processing/keyword_detector/models/GoogleNews-vectors-negative300.bin
+
+# load generator output (tools/loadgen/README.md)
+tools/loadgen/results/
