@@ -44,15 +44,24 @@ class Qwen3ASR(PosthocFileASR):
     def _speaker_turns(self):
         # pyannote diarization runs in THIS process — only qwen-asr needs 3.10.
         import torch
-        with permissive_torch_load():
-            from pyannote.audio import Pipeline
-            token = os.environ.get("HUGGING_FACE_HUB_TOKEN")
-            pipeline = Pipeline.from_pretrained(
-                "pyannote/speaker-diarization-3.1", use_auth_token=token)
-            pipeline.to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
-            diarization = pipeline(self.audio_file, max_speakers=self.max_speakers)
-            return [(turn.start, turn.end, label)
-                    for turn, _, label in diarization.itertracks(yield_label=True)]
+        pipeline = None
+        try:
+            with permissive_torch_load():
+                from pyannote.audio import Pipeline
+                token = os.environ.get("HUGGING_FACE_HUB_TOKEN")
+                pipeline = Pipeline.from_pretrained(
+                    "pyannote/speaker-diarization-3.1", use_auth_token=token)
+                pipeline.to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+                diarization = pipeline(self.audio_file, max_speakers=self.max_speakers)
+                return [(turn.start, turn.end, label)
+                        for turn, _, label in diarization.itertracks(yield_label=True)]
+        finally:
+            # The pipeline is rebuilt every run; without an explicit release the
+            # CUDA allocator keeps its blocks reserved for the life of the server
+            # process, so each run's ~2GB accumulates as idle VRAM.
+            pipeline = None
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     @staticmethod
     def _speaker_at(turns, midpoint):

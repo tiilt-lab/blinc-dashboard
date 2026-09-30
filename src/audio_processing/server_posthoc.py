@@ -7,6 +7,7 @@ if _rs_c not in _rs_sys.path:
     _rs_sys.path.insert(0, _rs_c)
 import reactor_safety  # reactor/thread boundary; src/common bootstrapped above
 from ws_protocol import WsMessageMixin  # shared onMessage/onClose
+from recording_filename import parse_recording_filename  # key/offset from filename
 import os
 import time
 import logging
@@ -149,9 +150,12 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
                 self.send_json({'type': 'error', 'message': 'Audio recording is empty ({0} bytes) and no audio track could be recovered from the video.'.format(os.path.getsize(str(self.audio_file)))})
             else:
                 self.audio_file = str(self.audio_file)
-                file_path_split = self.audio_file.split("(")
-                key = file_path_split[0].split("/")[-1]
-                off_set_date = file_path_split[1].split(")")[0]
+                # key IS the pod processing_key — the source every result
+                # callback is matched on server-side. The "<key> (ts)..." form
+                # used to leak a trailing space into the key, so the source no
+                # longer matched session_device.processing_key and every DB
+                # callback silently no-oped. See tests/test_recording_filename.py.
+                key, off_set_date = parse_recording_filename(self.audio_file)
  
                  #keep track of currently running posthoc audio analytics
                 # Atomic cross-process claim; False if a run for this pod is
@@ -228,9 +232,12 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
 
             if self.audio_file:
                 self.audio_file = str(self.audio_file)
-                file_path_split = self.audio_file.split("(")
-                key = file_path_split[0].split("/")[-1]
-                off_set_date = file_path_split[1].split(")")[0]
+                # key IS the pod processing_key — the source every result
+                # callback is matched on server-side. The "<key> (ts)..." form
+                # used to leak a trailing space into the key, so the source no
+                # longer matched session_device.processing_key and every DB
+                # callback silently no-oped. See tests/test_recording_filename.py.
+                key, off_set_date = parse_recording_filename(self.audio_file)
             else:
                 key = "No key"
                 off_set_date = "Sat Jun 27 18:17:13 2026" #this is just a generic date
@@ -271,9 +278,12 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
                 self.send_json({'type': 'error', 'message': 'No audio captured for this group.'})
             else:
                 self.audio_file = str(self.audio_file)
-                file_path_split = self.audio_file.split("(")
-                key = file_path_split[0].split("/")[-1]
-                off_set_date = file_path_split[1].split(")")[0]
+                # key IS the pod processing_key — the source every result
+                # callback is matched on server-side. The "<key> (ts)..." form
+                # used to leak a trailing space into the key, so the source no
+                # longer matched session_device.processing_key and every DB
+                # callback silently no-oped. See tests/test_recording_filename.py.
+                key, off_set_date = parse_recording_filename(self.audio_file)
  
                  #keep track of currently running posthoc audio analytics
                 if not running_audio_processes.try_claim(key):
@@ -524,6 +534,15 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
             self.audio_buffer = None
             import gc
             gc.collect()
+            # gc alone leaves the run's freed CUDA blocks reserved by torch's
+            # caching allocator, so idle VRAM never returns to baseline between
+            # runs; hand the unreferenced blocks back to the GPU.
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
         except Exception as e:
             logging.warning("on_run_complete worker teardown failed: %s", e)
 
