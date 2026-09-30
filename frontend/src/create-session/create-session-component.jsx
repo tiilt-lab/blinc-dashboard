@@ -103,7 +103,7 @@ function CreateSessionComponent(props) {
           const resp = response.json()
           resp.then(
             folderss => {
-              const folderresult = FolderModel.fromJsonList(folderss)
+              const folderresult = FolderModel.fileable(FolderModel.fromJsonList(folderss), props.userdata)
               setFolders(folderresult);
               const paramfolder = searchParam.get('folder');
               const passedFolderId = +parseInt(paramfolder, 10);

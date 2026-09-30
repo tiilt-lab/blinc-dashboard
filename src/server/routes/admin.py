@@ -13,6 +13,9 @@ import config as cf
 from redis_helper import RedisLogin
 import utility
 from utility import json_response, sanitize, sanitize_int_value
+from datetime import timedelta
+from tables.account_token import AccountToken
+import emails
 
 api_routes = Blueprint('admin', __name__)
 
@@ -60,7 +63,11 @@ def add_user(**kwargs):
     if success:
         new_password = user.reset_password(16)
         database.save_changes()
-        return json_response({'user': user.json(), 'password': new_password})
+        # The temporary password is still returned for the admin to pass on
+        # by hand; the invite lets the person choose their own instead.
+        token = database.create_account_token(user.id, AccountToken.INVITE, timedelta(days=7))
+        invited = emails.invite(user.email, kwargs['user']['email'], token)
+        return json_response({'user': user.json(), 'password': new_password, 'invite_emailed': invited})
     else:
         return json_response({'message': user}, 400)
     

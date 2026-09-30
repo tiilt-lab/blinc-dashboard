@@ -1,6 +1,7 @@
 from flask import request, session
 from functools import wraps
 import database
+import folder_access
 import utility
 from utility import json_response
 
@@ -77,20 +78,40 @@ def verify_local(f):
 
     return verify_function
 
-# Cross-account session reach, by role:
+# Cross-account session reach:
 #
-#   user   own sessions only, read and write
-#   admin  own sessions read and write, everyone else's read-only
+#   user   own sessions, read and write, plus sessions filed in folders shared
+#          with them — read as a viewer, write as an editor or manager
+#   admin  as a user, plus every session read-only
 #   super  every session, read and write
 #
 # _session_for() resolves the session a request names and returns None when the
 # caller may not touch it at that level, so both guards below (and the listing
-# in session.get_sessions) share one definition of "can reach".
+# in session.get_sessions) share one definition of "can reach". The rules
+# themselves live in folder_access.py.
+def folder_level(folder_id, user):
+    """The caller's sharing level in a folder (see folder_access), or None."""
+    return folder_access.effective_level(
+        folder_id, user,
+        get_folder=lambda fid: database.get_folders(id=fid, first=True),
+        member_levels=database.get_folder_member_levels)
+
+def can_file_session_into(folder_id, user):
+    """Whether the caller may create a session in, or move one into, a folder.
+    Needs editor there; admins may also file into any existing folder (their
+    folder picker lists every account's). None / -1 is the caller's top level."""
+    if folder_id is None or folder_id == -1:
+        return True
+    if user.get('role') in ADMIN_ROLES:
+        return database.get_folders(id=folder_id, first=True) is not None
+    return folder_access.at_least(folder_level(folder_id, user), folder_access.EDITOR)
+
 def _session_for(session_id, user, write):
-    role = user.get('role', 'user')
-    if role == 'super' or (role == 'admin' and not write):
-        return database.get_sessions(id=session_id)
-    return database.get_sessions(id=session_id, owner_id=user['id'])
+    session_model = database.get_sessions(id=session_id)
+    if folder_access.session_allowed(session_model, user, write,
+                                     lambda fid: folder_level(fid, user)):
+        return session_model
+    return None
 
 def _verify_session_guard(write):
     def decorator(f):
@@ -105,7 +126,7 @@ def _verify_session_guard(write):
     return decorator
 
 # Predicate form for routes that resolve the session id themselves (e.g. via a
-# transcript row) rather than from the URL. Same owner/super write matrix.
+# transcript row) rather than from the URL. Same write rules as the guards.
 def session_write_allowed(session_id, user):
     return bool(_session_for(session_id, user, write=True))
 
@@ -113,7 +134,7 @@ def session_write_allowed(session_id, user):
 verify_session_read_access = _verify_session_guard(write=False)
 
 # Write guard: mutating a session (rename, delete, stop, re-run analysis)
-# stays with its owner, or a super.
+# needs its owner, a super, or an editor of the folder it is filed in.
 verify_session_access = _verify_session_guard(write=True)
 
 # Read access to one pod's data (transcripts, metrics) for endpoints that name
@@ -170,25 +191,28 @@ def verify_session_access_json(f):
 
     return verify_function
 
-def verify_folder_access(f):
-    @wraps(f)
-    def verify_function(*args, **kwargs):
-        folder_id = kwargs['folder_id']
-        user = kwargs['user']
-        # Renaming, moving and deleting a folder stay with its owner, or a
-        # super — matching verify_session_access. Admins get read-only breadth
-        # from the listing in folder.get_folders, not from this guard.
-        if user.get('role') == 'super':
-            folder_model = database.get_folders(id=folder_id)
-        else:
-            folder_model = database.get_folders(id=folder_id, owner_id=user['id'])
-        if folder_model:
-            kwargs['folder'] = folder_model
-            return f(*args, **kwargs)
-        else:
+def verify_folder_level(required):
+    """Guard for /folders/<folder_id> routes: attach the folder and the
+    caller's level in it when that level is at least ``required``."""
+    def decorator(f):
+        @wraps(f)
+        def verify_function(*args, **kwargs):
+            folder_id = kwargs['folder_id']
+            level = folder_level(folder_id, kwargs['user'])
+            if folder_access.at_least(level, required):
+                kwargs['folder'] = database.get_folders(id=folder_id, first=True)
+                kwargs['folder_level'] = level
+                return f(*args, **kwargs)
+            if level is not None:
+                # They can already see the folder, so saying why is no leak.
+                return json_response({'message': 'You need {0} access to this folder.'.format(required)}, 403)
             return json_response({'message': _NOT_FOUND}, 404)
+        return verify_function
+    return decorator
 
-    return verify_function
+# Renaming, moving and deleting a folder need its manager: the owner, anyone
+# granted manager on it or above it, or a super.
+verify_folder_access = verify_folder_level(folder_access.MANAGER)
 
 
 def verify_keyword_list_access(f):

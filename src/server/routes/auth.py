@@ -8,6 +8,9 @@ import wrappers
 from tables.user import User
 import utility
 from redis_helper import RedisLogin
+from datetime import timedelta
+from tables.account_token import AccountToken
+import emails
 
 api_routes = Blueprint('auth', __name__)
 
@@ -104,6 +107,71 @@ def register():
     logging.info('Registered new user {0} from {1}.'.format(email, ip))
     return json_response(user.json())
 
+# -------------------------
+# Emailed links: forgot password, and finishing an invited account
+# -------------------------
+
+RESET_TTL = timedelta(hours=1)
+# One reset email per account per this many seconds, however often it is asked.
+RESET_COOLDOWN_SECONDS = 120
+
+@api_routes.route('/api/v1/password/forgot', methods=['POST'])
+@limiter.limit("10 per hour")
+@limiter.limit("5 per hour", key_func=get_request_username)
+def forgot_password():
+    # Always the same answer, whether or not the address has an account, so
+    # the form cannot be used to find out who is registered.
+    email = ((request.get_json(silent=True) or {}).get('email') or '').strip()
+    answer = json_response({'message': 'If that email has an account, a reset link is on its way.'})
+    user = database.get_users(email=email) if email else None
+    if user is None or user.locked:
+        return answer
+    age = database.latest_account_token_age(user.id, AccountToken.RESET)
+    if age is not None and age < RESET_COOLDOWN_SECONDS:
+        return answer
+    token = database.create_account_token(user.id, AccountToken.RESET, RESET_TTL)
+    emails.password_reset(user.email, token)
+    logging.info('Password reset requested for {0} from {1}.'.format(email, utility.get_client_ip(request)))
+    return answer
+
+@api_routes.route('/api/v1/password/token', methods=['POST'])
+@limiter.limit("30 per minute")
+def check_account_token():
+    # What the set-password page shows before asking for a password. POST so
+    # the token stays out of access logs.
+    token = database.get_account_token((request.get_json(silent=True) or {}).get('token'))
+    user = database.get_users(id=token.user_id) if token else None
+    if user is None:
+        return json_response({'message': 'This link has expired or was already used.'}, 404)
+    return json_response({'email': user.email, 'purpose': token.purpose})
+
+@api_routes.route('/api/v1/password/reset', methods=['POST'])
+@limiter.limit("20 per hour")
+def reset_password_with_token():
+    content = request.get_json(silent=True) or {}
+    password = content.get('password') or ''
+    if password != (content.get('confirm') or ''):
+        return json_response({'message': 'Confirmation password and password do not match.'}, 400)
+    token = database.get_account_token(content.get('token'))
+    user = database.get_users(id=token.user_id) if token else None
+    if user is None:
+        return json_response({'message': 'This link has expired or was already used.'}, 400)
+    if user.locked:
+        return json_response({'message': 'Your account has been locked. Please contact your IT department.'}, 400)
+    success, message = user.set_password(password)
+    if not success:
+        return json_response({'message': message}, 400)
+    database.save_changes()
+    database.use_account_tokens(user.id)
+    RedisLogin.unlock_login(user.email)
+    # Signed straight in, as after registering.
+    user.last_login = datetime.now(timezone.utc).replace(tzinfo=None)
+    database.save_changes()
+    session['user'] = user.json()
+    session.permanent = True
+    logging.info('Password set via emailed {0} link for {1}.'.format(token.purpose, user.email))
+    return json_response(user.json())
+
 @api_routes.route('/api/v1/logout', methods=['POST'])
 @wrappers.verify_login()
 def logout(**kwargs):
@@ -137,6 +205,8 @@ def change_password(**kwargs):
             if success:
                 session['user'] = user.json()
                 database.save_changes()
+                # Any reset link still in an inbox is now stale.
+                database.use_account_tokens(user.id)
                 return json_response()
         else:
             message = 'Password was not correct.'

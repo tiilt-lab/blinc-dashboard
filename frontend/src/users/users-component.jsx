@@ -103,6 +103,9 @@ function UsersComponent(props) {
             new AuthService().createUser(email, role),
             (body) =>
                 `${email} was created with the role "${role}".` +
+                (body.invite_emailed
+                    ? `\n\nAn invite to set their password was emailed to them.`
+                    : "") +
                 (body.password
                     ? `\n\nTemporary password: ${body.password}`
                     : ""),

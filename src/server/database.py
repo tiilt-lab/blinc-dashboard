@@ -1,9 +1,11 @@
 from app import db
 import re
-from sqlalchemy import and_
+from sqlalchemy import and_, or_
 from sqlalchemy.sql.expression import func
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import random
+import hashlib
+import secrets
 import passcode_words
 import logging
 
@@ -20,6 +22,8 @@ from tables.user import User
 from tables.student import Student
 from tables.api_client import APIClient
 from tables.folder import Folder
+from tables.folder_member import FolderMember
+from tables.account_token import AccountToken
 from tables.topic_model import TopicModel
 from tables.speaker import Speaker
 from tables.speaker_transcript_metrics import SpeakerTranscriptMetrics
@@ -533,10 +537,15 @@ def get_devices_in_session():
 # Sessions
 # -------------------------
 
-def get_sessions(id=None, owner_id=None, active=None, folder_ids=None, passcode=None, first=False):
+def get_sessions(id=None, owner_id=None, active=None, folder_ids=None, passcode=None, first=False, owner_or_folder_ids=None):
     query = db.session.query(Session).order_by(Session.creation_date.desc())
     if owner_id is not None:
-        query = query.filter(Session.owner_id == owner_id)
+        # With owner_or_folder_ids, "owned by owner_id OR filed in one of these
+        # folders" — the sessions a person reaches through folder sharing.
+        if owner_or_folder_ids:
+            query = query.filter(or_(Session.owner_id == owner_id, Session.folder.in_(owner_or_folder_ids)))
+        else:
+            query = query.filter(Session.owner_id == owner_id)
     if active == True:
         query = query.filter(Session.end_date.is_(None))
     if active == False:
@@ -930,6 +939,10 @@ def get_users(id=None, email=None, roles=None):
         return query.filter(User.email == email).first()
     return query.all()
 
+def get_user_ids_never_signed_in():
+    # Invited accounts whose owner has not set a password and signed in yet.
+    return {row[0] for row in db.session.query(User.id).filter(User.last_login.is_(None)).all()}
+
 def get_user_emails():
     # {user_id: email} in one query, so a listing can label rows with their
     # owner without a per-row lookup. Emails only — never hashes or salts.
@@ -971,6 +984,14 @@ def delete_user(id):
         db.session.query(SessionDevice).filter(SessionDevice.session_id.in_(sessionSubQuery)).delete(synchronize_session='fetch')
         db.session.query(Session).filter(Session.owner_id == id).delete()
         folder_ids = [folder.id for folder in db.session.query(Folder).filter(Folder.owner_id == id).all()]
+        # A shared folder can hold other people's sessions and subfolders.
+        # Deleting its owner must not delete (or FK-block on) their work, so
+        # lift those out to their owners' top level first.
+        if folder_ids:
+            db.session.query(Session).filter(Session.folder.in_(folder_ids)) \
+                .update({Session.folder: None}, synchronize_session='fetch')
+            db.session.query(Folder).filter(Folder.parent.in_(folder_ids), Folder.owner_id != id) \
+                .update({Folder.parent: None}, synchronize_session='fetch')
         _delete_folder_bulk(folder_ids)
         db.session.delete(user)
         db.session.commit()
@@ -1317,6 +1338,109 @@ def get_dependents(folder_id = None):
     return dependents
 
 # -------------------------
+# Emailed account links (password reset, invites)
+# -------------------------
+
+def _token_hash(raw):
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
+
+def create_account_token(user_id, purpose, ttl):
+    # Returns the raw token for the email link; only its hash is stored.
+    raw = secrets.token_urlsafe(32)
+    expires = datetime.now(timezone.utc).replace(tzinfo=None) + ttl
+    db.session.add(AccountToken(user_id, purpose, _token_hash(raw), expires))
+    db.session.commit()
+    return raw
+
+def get_account_token(raw):
+    # The unused, unexpired token row for a raw link token, or None.
+    if not raw:
+        return None
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    return db.session.query(AccountToken).filter(
+        AccountToken.token_hash == _token_hash(raw),
+        AccountToken.used_at.is_(None),
+        AccountToken.expires_at > now).first()
+
+def latest_account_token_age(user_id, purpose):
+    # Seconds since the newest token of this kind was issued, or None.
+    token = db.session.query(AccountToken).filter(
+        AccountToken.user_id == user_id, AccountToken.purpose == purpose) \
+        .order_by(AccountToken.created_at.desc()).first()
+    if token is None:
+        return None
+    return (datetime.now(timezone.utc).replace(tzinfo=None) - token.created_at).total_seconds()
+
+def use_account_tokens(user_id):
+    # Spend every outstanding link for a user once one of them is used (or the
+    # password changes), so an older email cannot be replayed.
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    db.session.query(AccountToken).filter(
+        AccountToken.user_id == user_id, AccountToken.used_at.is_(None)) \
+        .update({AccountToken.used_at: now}, synchronize_session='fetch')
+    db.session.commit()
+
+def invite_user(email, role='user'):
+    # An account for someone who has not signed up yet: a random password
+    # nobody knows, set by them through the emailed invite link. Returns
+    # (user, raw_token) or (None, message).
+    success, user = add_user(email, role)
+    if not success:
+        return None, user
+    user.reset_password(32)
+    db.session.commit()
+    return user, create_account_token(user.id, AccountToken.INVITE, timedelta(days=7))
+
+# -------------------------
+# Folder sharing (rules in folder_access.py)
+# -------------------------
+
+def get_folder_member_levels(user_id):
+    # {folder_id: level} of one user's direct grants.
+    rows = db.session.query(FolderMember.folder_id, FolderMember.level) \
+        .filter(FolderMember.user_id == user_id).all()
+    return {row[0]: row[1] for row in rows}
+
+def get_folder_members(folder_ids):
+    # [(FolderMember, email)] for the direct grants on any of folder_ids.
+    return db.session.query(FolderMember, User.email) \
+        .join(User, User.id == FolderMember.user_id) \
+        .filter(FolderMember.folder_id.in_(folder_ids)) \
+        .order_by(User.email).all()
+
+def set_folder_member(folder_id, user_id, level, granted_by=None):
+    member = db.session.query(FolderMember) \
+        .filter(FolderMember.folder_id == folder_id, FolderMember.user_id == user_id).first()
+    if member is None:
+        member = FolderMember(folder_id, user_id, level, granted_by=granted_by)
+        db.session.add(member)
+    else:
+        member.level = level
+        member.granted_by = granted_by
+    db.session.commit()
+    return member
+
+def remove_folder_member(folder_id, user_id):
+    removed = db.session.query(FolderMember) \
+        .filter(FolderMember.folder_id == folder_id, FolderMember.user_id == user_id) \
+        .delete(synchronize_session='fetch')
+    db.session.commit()
+    return removed > 0
+
+def get_folder_ancestors(folder_id):
+    # [folder, parent, grandparent, ...] starting at folder_id itself.
+    chain, seen = [], set()
+    current = folder_id
+    while current is not None and current not in seen:
+        seen.add(current)
+        folder = get_folders(id=current, first=True)
+        if folder is None:
+            break
+        chain.append(folder)
+        current = folder.parent
+    return chain
+
+# -------------------------
 # LLM Data
 # -------------------------
 
@@ -1415,7 +1539,7 @@ def update_synthesized_feedback_report(id, sessionId=None, sessionDeviceId=None,
    
 
 
-def get_session_ids_with_video(owner_id=None):
+def get_session_ids_with_video(owner_id=None, session_ids=None):
     # One query returning the set of session ids that have any video metrics,
     # so the sessions list can flag video without a per-session query.
     query = db.session.query(SessionDevice.session_id) \
@@ -1423,10 +1547,12 @@ def get_session_ids_with_video(owner_id=None):
     if owner_id is not None:
         query = query.join(Session, SessionDevice.session_id == Session.id) \
             .filter(Session.owner_id == owner_id)
+    if session_ids is not None:
+        query = query.filter(SessionDevice.session_id.in_(session_ids))
     return set(row[0] for row in query.distinct().all())
 
 
-def get_session_ids_with_posthoc(owner_id=None):
+def get_session_ids_with_posthoc(owner_id=None, session_ids=None):
     # Set of session ids where any device has had a post-hoc re-analysis run,
     # so the sessions list can flag it without a per-session query. Degrades to
     # empty if the posthoc_analyzed_date column has not been migrated in yet, so
@@ -1437,6 +1563,8 @@ def get_session_ids_with_posthoc(owner_id=None):
         if owner_id is not None:
             query = query.join(Session, SessionDevice.session_id == Session.id) \
                 .filter(Session.owner_id == owner_id)
+        if session_ids is not None:
+            query = query.filter(SessionDevice.session_id.in_(session_ids))
         return set(row[0] for row in query.distinct().all())
     except Exception as e:
         logging.warning('posthoc flag query failed (migration pending?): %s', e)
@@ -1444,13 +1572,15 @@ def get_session_ids_with_posthoc(owner_id=None):
         return set()
 
 
-def get_session_device_counts(owner_id=None):
+def get_session_device_counts(owner_id=None, session_ids=None):
     # {session_id: pod_count} in one query, so the sessions list can show pod
     # counts without a per-session query (mirrors get_session_ids_with_video).
     query = db.session.query(SessionDevice.session_id, func.count(SessionDevice.id))
     if owner_id is not None:
         query = query.join(Session, SessionDevice.session_id == Session.id) \
             .filter(Session.owner_id == owner_id)
+    if session_ids is not None:
+        query = query.filter(SessionDevice.session_id.in_(session_ids))
     query = query.group_by(SessionDevice.session_id)
     return {row[0]: row[1] for row in query.all()}
 
@@ -1480,7 +1610,7 @@ def get_pod_speaker_counts(session_id):
     return {row[0]: row[1] for row in rows}
 
 
-def get_session_participant_counts(owner_id=None):
+def get_session_participant_counts(owner_id=None, session_ids=None):
     # {session_id: total participants across the session's pods}, one query, so
     # the sessions list can show participant totals (mirrors the video/posthoc
     # flag helpers).
@@ -1489,6 +1619,8 @@ def get_session_participant_counts(owner_id=None):
     if owner_id is not None:
         query = query.join(Session, SessionDevice.session_id == Session.id) \
             .filter(Session.owner_id == owner_id)
+    if session_ids is not None:
+        query = query.filter(SessionDevice.session_id.in_(session_ids))
     query = query.group_by(SessionDevice.session_id)
     return {row[0]: row[1] for row in query.all()}
 

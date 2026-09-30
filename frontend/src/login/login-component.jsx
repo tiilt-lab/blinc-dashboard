@@ -145,6 +145,13 @@ function LoginPage() {
                     </div>
                 )}
 
+                <Link
+                    to={"/forgot-password" + (email.trim() ? "?email=" + encodeURIComponent(email.trim()) : "")}
+                    className="-mt-1 self-start text-sm font-semibold text-tiilt hover:underline"
+                >
+                    Forgot password?
+                </Link>
+
                 <button
                     type="submit"
                     disabled={loading}

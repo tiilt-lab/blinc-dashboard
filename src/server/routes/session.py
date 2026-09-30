@@ -16,6 +16,7 @@ import watchers
 from datetime import datetime, timezone
 from handlers import session_handler
 import wrappers
+import folder_access
 import authz
 import socketio_helper
 import posthoc_state
@@ -44,19 +45,26 @@ _device_in_session = authz.device_in_session
 @api_routes.route('/api/v1/sessions', methods=['GET'])
 @wrappers.verify_login(public=True)
 def get_sessions(user, **kwargs):
-    # Admins and supers see every account's sessions, so the helpers below are
-    # asked for all owners (they treat owner_id=None as unfiltered). Each row
-    # carries 'owner' and 'owned' so the list can label whose session it is and
-    # the UI can hide actions an admin may look at but not perform.
+    # Admins and supers see every account's sessions (the helpers below treat
+    # session_ids=None as unfiltered); everyone else sees their own plus those
+    # shared with them through folders. Each row carries 'owner', 'owned' and
+    # 'can_modify' so the list can label whose session it is and hide actions
+    # the caller may look at but not perform.
     sees_all = user.get('role') in wrappers.ADMIN_ROLES
-    scope = None if sees_all else user['id']
-    sessions = database.get_sessions(owner_id=scope)
-    video_ids = database.get_session_ids_with_video(owner_id=scope)
-    posthoc_ids = database.get_session_ids_with_posthoc(owner_id=scope)
-    pod_counts = database.get_session_device_counts(owner_id=scope)
-    participant_counts = database.get_session_participant_counts(owner_id=scope)
+    folder_levels = folder_access.levels_for_all(
+        database.get_folders(), user, database.get_folder_member_levels)
+    if sees_all:
+        sessions = database.get_sessions()
+        scope = None
+    else:
+        sessions = database.get_sessions(owner_id=user['id'], owner_or_folder_ids=list(folder_levels))
+        scope = [s.id for s in sessions]
+    video_ids = database.get_session_ids_with_video(session_ids=scope)
+    posthoc_ids = database.get_session_ids_with_posthoc(session_ids=scope)
+    pod_counts = database.get_session_device_counts(session_ids=scope)
+    participant_counts = database.get_session_participant_counts(session_ids=scope)
     running_session_ids = database.get_session_ids_for_devices(posthoc_state.running_device_ids())
-    owner_emails = database.get_user_emails() if sees_all else {}
+    owner_emails = database.get_user_emails() if any(s.owner_id != user['id'] for s in sessions) else {}
     result = []
     for session in sessions:
         data = session.json()
@@ -66,7 +74,11 @@ def get_sessions(user, **kwargs):
         data['participant_count'] = participant_counts.get(session.id, 0)
         data['analysis_running'] = session.id in running_session_ids
         data['owned'] = session.owner_id == user['id']
-        if sees_all:
+        # Whether the caller may rename / move / delete it: owner, super, or an
+        # editor of its folder. Admins read everything but write only their own.
+        data['can_modify'] = (data['owned'] or user.get('role') == 'super'
+                              or folder_access.at_least(folder_levels.get(session.folder), folder_access.EDITOR))
+        if not data['owned']:
             data['owner'] = owner_emails.get(session.owner_id)
         result.append(data)
     return json_response(result)
@@ -122,10 +134,8 @@ def update_session(session_id, user, **kwargs):
     # None means "not changing the folder" — without the None guard a plain
     # rename ran get_folders(id=None), which returns the user's first folder
     # or None, 404ing every rename for users who own no folders.
-    if folder is not None and folder != -1:
-        owned_folder = database.get_folders(id=folder, owner_id=user['id'], first =True)
-        if not owned_folder:
-            return json_response({'message': 'Either the folder does not exist or invalid access'}, 404)
+    if folder is not None and not wrappers.can_file_session_into(folder, user):
+        return json_response({'message': 'Either the folder does not exist or invalid access'}, 404)
     session = database.update_session(session_id, name, folder)
     # Analysis-time settings (applied by the next posthoc run).
     keyword_list_id = sanitize(request.json.get('keywordListId', None))
@@ -172,14 +182,10 @@ def create_session(user, **kwargs):
     folder = request.json.get('folder', None)
     if folder == -1:
         folder = None
-    if folder:
-        # Admins/supers see every account's folders in GET /api/folders (so
-        # the picker offers them), so creation must accept the same set —
-        # owner-only here made every non-owned pick fail as "Invalid Session".
-        sees_all = user.get('role') in wrappers.ADMIN_ROLES
-        owned_folder = database.get_folders(id=folder, owner_id=None if sees_all else user['id'], first=True)
-        if not owned_folder:
-            return json_response({'message': 'Either the folder does not exist or invalid access'}, 404)
+    # The folder picker lists every folder the caller can see, so creation
+    # must accept the same set wherever they may file (editor, or admin).
+    if folder and not wrappers.can_file_session_into(folder, user):
+        return json_response({'message': 'Either the folder does not exist or invalid access'}, 404)
     new_session = session_handler.create_session(user['id'], name, devices, keyword_list_id, topic_model_id, byod, features, doa, folder, asr=asr)
     return json_response(new_session.json())
 
@@ -642,9 +648,9 @@ def get_video_attribution(session_id, session_device_id, **kwargs):
 @wrappers.verify_login(public=True)
 def mark_posthoc_completed(session_id, session_device_id, user, **kwargs):
     # Recorded when a post-hoc re-analysis finishes for a pod, so the sessions
-    # list can show which discussions have been re-analyzed. Owner-gated.
-    owned = database.get_sessions(id=session_id, owner_id=user['id'], first=True)
-    if owned is None:
+    # list can show which discussions have been re-analyzed. Needs write access
+    # (owner, super, or an editor of the session's folder).
+    if not wrappers.session_write_allowed(session_id, user):
         return json_response({'message': 'Session not found.'}, 404)
     if _device_in_session(session_device_id, session_id) is None:
         return json_response({'message': 'Session device not found.'}, 404)
@@ -1010,8 +1016,8 @@ def upload_video_session(user, **kwargs):
 
 
 # Global analysis-queue view (the queue itself is one worker across all
-# sessions). Jobs are scoped to sessions the caller owns unless they're an
-# admin; names are joined in so the UI needs no extra requests.
+# sessions). Jobs are scoped to sessions the caller can read (own or shared
+# through a folder) unless they're an admin; names are joined in so the UI needs no extra requests.
 @api_routes.route('/api/v1/posthoc_queue', methods=['GET'])
 @wrappers.verify_login()
 def global_posthoc_queue(**kwargs):
@@ -1027,7 +1033,7 @@ def global_posthoc_queue(**kwargs):
         session = session_cache[sid]
         if not session:
             continue
-        if not is_admin and session.owner_id != user['id']:
+        if not is_admin and not wrappers._session_for(sid, user, write=False):
             continue
         device = database.get_session_devices(id=job['device_id'])
         entry = dict(job)

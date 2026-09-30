@@ -7,6 +7,7 @@ import { AppContextMenu } from "../components/context-menu/context-menu-componen
 import { GenericDialogBox } from "../dialog/dialog-component"
 import { Appheader } from "../header/header-component"
 import { AppFolderSelectComponent } from "../components/folder-select/folder-select-component"
+import { FolderShareDialog } from "../components/folder-share/folder-share-dialog"
 import { SessionService } from "../services/session-service"
 import { SessionModel } from "../models/session"
 import style from "./sessions.module.css"
@@ -411,6 +412,14 @@ function FolderRow({ folder, sessions, onOpen, onOpenSession, openFolderDialog }
                     >
                         {folder.name}
                     </span>
+                    {!folder.owned ? (
+                        <span
+                            title={`Shared by ${folder.owner || "another account"} — you are a${folder.access === "editor" ? "n" : ""} ${folder.access}`}
+                            className="flex-none rounded-full bg-tiilt-line/40 px-1.5 py-0.5 text-[11px] font-semibold whitespace-nowrap text-tiilt-muted"
+                        >
+                            Shared{folder.owner ? ` by ${folder.owner}` : ""}
+                        </span>
+                    ) : null}
                     <span className="flex-none text-xs text-tiilt-muted">
                         {count === 1 ? "1 session" : `${count} sessions`}
                     </span>
@@ -441,24 +450,36 @@ function FolderRow({ folder, sessions, onOpen, onOpenSession, openFolderDialog }
                         <button
                             role="menuitem"
                             className={menuItemClass}
-                            onClick={() => openFolderDialog("RenameFolder", folder)}
+                            onClick={() => openFolderDialog("ShareFolder", folder)}
                         >
-                            Edit Name
+                            {folder.can_manage_members ? "Share..." : "People with access"}
                         </button>
-                        <button
-                            role="menuitem"
-                            className={menuItemClass}
-                            onClick={() => openFolderDialog("MoveFolder", folder)}
-                        >
-                            Move To...
-                        </button>
-                        <button
-                            role="menuitem"
-                            className={menuDangerClass}
-                            onClick={() => openFolderDialog("DeleteFolder", folder)}
-                        >
-                            Delete
-                        </button>
+                        {/* Renaming, moving and deleting need manager access. */}
+                        {folder.access === "manager" ? (
+                            <>
+                                <button
+                                    role="menuitem"
+                                    className={menuItemClass}
+                                    onClick={() => openFolderDialog("RenameFolder", folder)}
+                                >
+                                    Edit Name
+                                </button>
+                                <button
+                                    role="menuitem"
+                                    className={menuItemClass}
+                                    onClick={() => openFolderDialog("MoveFolder", folder)}
+                                >
+                                    Move To...
+                                </button>
+                                <button
+                                    role="menuitem"
+                                    className={menuDangerClass}
+                                    onClick={() => openFolderDialog("DeleteFolder", folder)}
+                                >
+                                    Delete
+                                </button>
+                            </>
+                        ) : null}
                     </AppContextMenu>
                 </span>
             </td>
@@ -706,7 +727,7 @@ function SessionRow({ session, rowIndex, onOpen, openSessionDialog, endSession, 
                     )}
                     {session.owner && !session.owned ? (
                         <span
-                            title={`Owned by ${session.owner} \u2014 you can view this session but not change it`}
+                            title={`Owned by ${session.owner}${canModify ? "" : " \u2014 you can view this session but not change it"}`}
                             className="mt-0.5 flex w-fit flex-none items-center gap-1 rounded-full bg-tiilt-line/40 px-1.5 py-0.5 text-[11px] font-semibold whitespace-nowrap text-tiilt-muted"
                         >
                             {session.owner}
@@ -938,21 +959,31 @@ function DiscussionSessionPage(props) {
                                 </span>
                             </nav>
                             <div className="flex flex-wrap justify-end gap-2">
-                                <button
-                                    className={btnSecondary + " flex items-center gap-1.5"}
-                                    onClick={() => props.openFolderDialog("NewFolder")}
-                                >
-                                    <FolderIcon className="h-4 w-4" />
-                                    New folder
-                                </button>
-                                <UploadVideoButton />
-                                <button
-                                    className={btnPrimary + " flex items-center gap-1.5"}
-                                    onClick={props.newRecording}
-                                >
-                                    <span aria-hidden="true" className="text-base leading-none">+</span>
-                                    New session
-                                </button>
+                                {/* Viewers of a shared folder cannot add to it. */}
+                                {!props.breadcrumbs.length ||
+                                props.breadcrumbs[props.breadcrumbs.length - 1].access !== "viewer" ? (
+                                    <>
+                                        <button
+                                            className={btnSecondary + " flex items-center gap-1.5"}
+                                            onClick={() => props.openFolderDialog("NewFolder")}
+                                        >
+                                            <FolderIcon className="h-4 w-4" />
+                                            New folder
+                                        </button>
+                                        <UploadVideoButton />
+                                        <button
+                                            className={btnPrimary + " flex items-center gap-1.5"}
+                                            onClick={props.newRecording}
+                                        >
+                                            <span aria-hidden="true" className="text-base leading-none">+</span>
+                                            New session
+                                        </button>
+                                    </>
+                                ) : (
+                                    <span className="self-center text-xs text-tiilt-muted">
+                                        View only {"\u2014"} shared by {props.breadcrumbs[props.breadcrumbs.length - 1].owner}
+                                    </span>
+                                )}
                             </div>
                         </div>
 
@@ -1095,12 +1126,9 @@ function DiscussionSessionPage(props) {
                                                             key={session.id}
                                                             rowIndex={rowIndex}
                                                             session={session}
-                                                            // Admins see every account's sessions but may
-                                                            // only read them; supers may change anything.
-                                                            canModify={
-                                                                session.owned ||
-                                                                (props.me || {}).role === "super"
-                                                            }
+                                                            // Owner, super, or an editor of the session's
+                                                            // folder; the server decides (can_modify).
+                                                            canModify={session.can_modify}
                                                             checked={props.selectedIds[session.id]}
                                                             onToggle={() => props.toggleSelected(session.id)}
                                                             onOpen={props.goToSession}
@@ -1301,6 +1329,20 @@ function DiscussionSessionPage(props) {
                             Cancel
                         </button>
                     </div>
+                ) : (
+                    <></>
+                )}
+
+                {props.currentForm === "ShareFolder" && props.selectedFolder ? (
+                    <FolderShareDialog
+                        folder={props.selectedFolder}
+                        me={props.me}
+                        onClose={props.closeDialog}
+                        onLeft={() => {
+                            props.closeDialog()
+                            props.displayFolder()
+                        }}
+                    />
                 ) : (
                     <></>
                 )}

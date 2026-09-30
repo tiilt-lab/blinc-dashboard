@@ -502,7 +502,7 @@ function SessionsComponent(props) {
         setCurrentForm(newForm)
         setSelectedSession(selectedSession)
         if (newForm === "MoveSession") {
-            setSelectableFolders(folders)
+            setSelectableFolders(FolderModel.fileable(folders, props.userdata))
         }
     }
 
@@ -511,7 +511,7 @@ function SessionsComponent(props) {
         setSelectedFolder(selectedFolder)
         if (newForm === "MoveFolder") {
             setSelectableFolders(
-                folders.filter(
+                FolderModel.fileable(folders, props.userdata).filter(
                     (f) =>
                         f.parent !== selectedFolder.id &&
                         f.id !== selectedFolder.id,
@@ -627,7 +627,7 @@ function SessionsComponent(props) {
                 // Same prep as the single-session Move dialog: without this
                 // the folder picker rendered an empty list (Home only).
                 if (form === "MoveSessions") {
-                    setSelectableFolders(folders)
+                    setSelectableFolders(FolderModel.fileable(folders, props.userdata))
                     setFolderSelect(null)
                 }
                 setCurrentForm(form)

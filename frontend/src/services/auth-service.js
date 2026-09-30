@@ -34,6 +34,39 @@ class AuthService {
     }
   }
 
+  // Emailed links. Each resolves to { ok, message, ... } for the page to
+  // render; the server gives the same answer to forgotPassword whether or not
+  // the address has an account.
+  async _call(path, body) {
+    try {
+      const response = await new ApiService().httpRequestCall(path, "POST", body);
+      if (response.status === 429) {
+        return { ok: false, message: "Too many attempts. Wait a few minutes and try again." };
+      }
+      let data = {};
+      try {
+        data = await response.json();
+      } catch {
+        /* proxy and server errors are not always JSON */
+      }
+      return { ok: response.status === 200, ...data };
+    } catch {
+      return { ok: false, message: "The server could not be reached." };
+    }
+  }
+
+  forgotPassword(email) {
+    return this._call("api/v1/password/forgot", { email });
+  }
+
+  checkAccountToken(token) {
+    return this._call("api/v1/password/token", { token });
+  }
+
+  resetPassword(token, password, confirm) {
+    return this._call("api/v1/password/reset", { token, password, confirm });
+  }
+
   login(email, password, setLoginStatus, setAuthObject) {
     const body = {
       email: email,

@@ -5,11 +5,14 @@ export class FolderModel {
     owner_id;
     creation_date;
     parent;
-    // Sent to admins and supers, who see every account's folders: the owner's
-    // email and whether it is the caller's own. Only a super may change one
-    // they do not own.
+    // The owner's email (sent for any folder that is not the caller's own) and
+    // whether it is theirs.
     owner;
     owned;
+    // The caller's level here — "viewer", "editor" or "manager" — and whether
+    // they may change who has access (managers, and admins on any folder).
+    access;
+    can_manage_members;
 
     static fromJson(json) {
         const model = new FolderModel();
@@ -19,7 +22,24 @@ export class FolderModel {
         model.parent = json['parent'];
         model.owner = json['owner'] != null ? json['owner'] : null;
         model.owned = json['owned'] !== false;
+        model.access = json['access'] || 'manager';
+        model.can_manage_members = json['can_manage_members'] !== false;
         return model;
+    }
+
+    // The folders a person may file sessions or folders into, for pickers:
+    // view-only shared folders drop out (admins may file anywhere), and any
+    // folder whose parent dropped out is lifted to the top so it stays
+    // reachable in the tree.
+    static fileable(folders, me) {
+        const role = (me || {}).role;
+        if (role === 'admin' || role === 'super') return folders;
+        const kept = folders.filter((f) => f.access !== 'viewer');
+        const ids = new Set(kept.map((f) => f.id));
+        return kept.map((f) => {
+            if (f.parent == null || ids.has(f.parent)) return f;
+            return Object.assign(Object.create(FolderModel.prototype), f, { parent: null });
+        });
     }
 
     // Converts JSON to FolderModel[]

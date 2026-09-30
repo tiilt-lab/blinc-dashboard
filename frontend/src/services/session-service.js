@@ -468,6 +468,20 @@ class SessionService {
   deleteFolder(folderId) {
     return this.api.httpRequestCall(`api/folders/${folderId}`, "DELETE", {});
   }
+
+  // Folder sharing: who has access (direct and inherited), add/change a person
+  // by email at viewer / editor / manager, and remove one (or leave).
+  getFolderMembers(folderId) {
+    return this.api.httpRequestCall(`api/folders/${folderId}/members`, "GET", {});
+  }
+
+  setFolderMember(folderId, email, level) {
+    return this.api.httpRequestCall(`api/folders/${folderId}/members`, "PUT", { email, level });
+  }
+
+  removeFolderMember(folderId, userId) {
+    return this.api.httpRequestCall(`api/folders/${folderId}/members/${userId}`, "DELETE", {});
+  }
 }
 
 export { SessionService };
