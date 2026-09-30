@@ -13,6 +13,7 @@ _COMMON = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)
 if _COMMON not in sys.path:
     sys.path.insert(0, _COMMON)
 from redis_client import RedisSessions as _CommonRedisSessions
+import posthoc_ticket as _posthoc_ticket  # key format shared with the post-hoc services
 
 r = redis.StrictRedis(host=cf.redis_host(), port=cf.redis_port(), db=cf.redis_db(), decode_responses=True)
 
@@ -86,6 +87,15 @@ class RedisSessions(_CommonRedisSessions):
         r.delete(redis_key)
 
     # get_device_key / get_session_config are inherited from common.
+
+class RedisPosthocTicket:
+    # Short-lived per-pod credential for the post-hoc websockets; the services
+    # verify it through common/posthoc_ticket (same key and TTL).
+    TTL = _posthoc_ticket.TICKET_TTL
+
+    @staticmethod
+    def mint(session_device_id):
+        return _posthoc_ticket.mint(r, session_device_id)
 
 
 if __name__ == '__main__':

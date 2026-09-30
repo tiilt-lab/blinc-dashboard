@@ -3,6 +3,7 @@ import { Refresh } from "@/Icons"
 import { StatusPill } from "../status-pill"
 import { ApiService } from "../../services/api-service"
 import { SessionService } from "../../services/session-service"
+import { PosthocService } from "../../services/posthoc-service"
 
 // Post-hoc re-analysis actions, faithfully ported from the videodev
 // pod-component's dual-socket protocol. Three operations:
@@ -17,7 +18,9 @@ import { SessionService } from "../../services/session-service"
 //
 // Every operation follows: connect -> Initialize_* -> on a readiness ack send
 // the matching start_* -> track started -> process_completed, with a 20s
-// heartbeat while running.
+// heartbeat while running. Every message that names a pod carries a
+// short-lived `ticket` minted by the API (see PosthocService); without it the
+// services answer {type: "error", message: "Not authorised for this pod."}.
 
 // Server readiness acks (→ send the operation's start message).
 const READY_ACKS = new Set([
@@ -63,6 +66,23 @@ const ATTENTION_OPTIONS = [
 
 function PosthocTrigger({ session, sessionDeviceId, speakers, transcripts, models, lastAnalyzed, sessionDevice }) {
     const api = new ApiService()
+    // Per-pod ticket the sockets require. Reusable until it expires, so it is
+    // cached and re-minted a minute early (the status probe re-asks every
+    // 15 s and can outlive one ticket). Keyed to the pod it was minted for.
+    const ticket = useRef({ value: null, expiresAt: 0, forDevice: null })
+    const getTicket = () => {
+        const t = ticket.current
+        if (t.value && t.forDevice === sessionDeviceId && Date.now() < t.expiresAt)
+            return Promise.resolve(t.value)
+        return new PosthocService().getTicket(session.id, sessionDeviceId).then((d) => {
+            ticket.current = {
+                value: d.ticket,
+                forDevice: sessionDeviceId,
+                expiresAt: Date.now() + Math.max(30, (d.ttl || 900) - 60) * 1000,
+            }
+            return d.ticket
+        })
+    }
     const sockets = useRef([])
     const heartbeat = useRef(null)
     // Per-stream state for the currently running action, keyed by a label
@@ -130,12 +150,25 @@ function PosthocTrigger({ session, sessionDeviceId, speakers, transcripts, model
             try {
                 const ws = new WebSocket(endpoint)
                 const ask = () =>
-                    ws.send(
-                        JSON.stringify({
-                            type: "query_posthoc_status",
-                            sessiondeviceid: sessionDeviceId,
-                        }),
-                    )
+                    getTicket()
+                        .then((t) => {
+                            if (ws.readyState !== WebSocket.OPEN) return
+                            ws.send(
+                                JSON.stringify({
+                                    type: "query_posthoc_status",
+                                    sessiondeviceid: sessionDeviceId,
+                                    ticket: t,
+                                }),
+                            )
+                        })
+                        .catch(() => {
+                            // Ticket refused mid-probe: nothing to ask.
+                            try {
+                                ws.close()
+                            } catch {
+                                /* already closed */
+                            }
+                        })
                 let timer = null
                 ws.onopen = ask
                 ws.onmessage = (e) => {
@@ -209,9 +242,21 @@ function PosthocTrigger({ session, sessionDeviceId, speakers, transcripts, model
                 /* service unreachable */
             }
         }
-        probe(api.getAudioPosthocWebsocketEndpoint(), "Audio")
-        probe(api.getVideoPosthocWebsocketEndpoint(), "Video")
-        return () => probes.forEach((f) => f())
+        // Mint the ticket BEFORE opening any socket. Without one (read-only
+        // viewer, or the API refused) skip the probes: the HTTP
+        // posthoc_running poll below still reports background runs.
+        let unmounted = false
+        getTicket()
+            .then(() => {
+                if (unmounted) return
+                probe(api.getAudioPosthocWebsocketEndpoint(), "Audio")
+                probe(api.getVideoPosthocWebsocketEndpoint(), "Video")
+            })
+            .catch(() => {})
+        return () => {
+            unmounted = true
+            probes.forEach((f) => f())
+        }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [sessionDeviceId])
 
@@ -332,13 +377,13 @@ function PosthocTrigger({ session, sessionDeviceId, speakers, transcripts, model
         }, 20000)
     }
 
-    // Open one socket for one operation on one stream.
-    const openSocket = ({ endpoint, label, init, startType }) => {
+    // Open one socket for one operation on one stream; `t` is the pod ticket.
+    const openSocket = ({ endpoint, label, init, startType }, t) => {
         const ws = new WebSocket(endpoint)
         ws.binaryType = "arraybuffer"
         sockets.current.push(ws)
         setStream(label, "connecting")
-        ws.onopen = () => ws.send(JSON.stringify(init))
+        ws.onopen = () => ws.send(JSON.stringify({ ...init, ticket: t }))
         ws.onmessage = (e) => {
             if (typeof e.data !== "string") return
             let msg
@@ -348,7 +393,7 @@ function PosthocTrigger({ session, sessionDeviceId, speakers, transcripts, model
                 return
             }
             if (READY_ACKS.has(msg.type)) {
-                ws.send(JSON.stringify({ type: startType }))
+                ws.send(JSON.stringify({ type: startType, ticket: t }))
                 startHeartbeat()
             } else if (STARTED_ACKS.has(msg.type)) {
                 setStream(label, "running")
@@ -434,7 +479,19 @@ function PosthocTrigger({ session, sessionDeviceId, speakers, transcripts, model
         setStreamMeta({})
         setMessage("")
         setAction(kind)
-        defs.forEach(openSocket)
+        // Ticket first, then the sockets: without one the services refuse
+        // every pod-naming message, so surface the refusal here instead of a
+        // bare socket error.
+        getTicket()
+            .then((t) => defs.forEach((d) => openSocket(d, t)))
+            .catch((e) => {
+                const reason = `Not authorised to re-run analysis on this pod (${e.message}).`
+                setMessage(reason)
+                for (const d of defs) {
+                    setStream(d.label, "error")
+                    updateMeta(d.label, { endedAt: Date.now(), message: reason })
+                }
+            })
     }
 
     const runFull = () =>

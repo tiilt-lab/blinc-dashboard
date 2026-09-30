@@ -14,6 +14,7 @@ import asyncio
 
 import posthoc_state
 
+# Loopback on purpose: the services now bind 127.0.0.1 only.
 AUDIO_WS = "ws://127.0.0.1:%s" % os.getenv("DC_AUDIO_POSTHOC_WS_PORT", "9015")
 VIDEO_WS = "ws://127.0.0.1:%s" % os.getenv("DC_VIDEO_POSTHOC_WS_PORT", "9014")
 _POD_TIMEOUT = 150 * 60  # video-bound pods on long recordings can exceed an hour
@@ -109,7 +110,11 @@ def _run_job(job):
         device_id = job["device_id"]
         speakers = [{"id": s.id, "alias": s.get_alias()}
                     for s in database.get_speakers(session_device_id=device_id)]
+        # The services refuse any pod-naming message without a ticket minted
+        # for that pod (common/posthoc_ticket); mint one exactly as the UI does.
+        from redis_helper import RedisPosthocTicket
         base = {
+            "ticket": RedisPosthocTicket.mint(device_id),
             "sessionid": job["session_id"],
             "sessiondeviceid": device_id,
             "server_start": session.creation_date.strftime("%Y-%m-%dT%H:%M:%S.000Z"),

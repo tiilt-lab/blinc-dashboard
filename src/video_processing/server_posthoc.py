@@ -64,6 +64,16 @@ import redis_client
 from pod_registry import PodRegistry
 running_video_processes = PodRegistry(redis_factory=redis_client._redis,
                                       prefix='video-posthoc:')
+# Any message that names a pod must carry a ticket the API minted for THAT pod
+# (common/posthoc_ticket): this socket is reachable by anyone through nginx,
+# and a start wipes the pod's previous analysis. The enrollment message
+# (save-audio-video-fingerprinting) names no pod and is out of scope here.
+from posthoc_ticket import ticket_allows
+_TICKETED_TYPES = frozenset((
+    'Initialize_video_processing_analytics',
+    'cancel_posthoc',
+    'query_posthoc_status',
+))
 _running_guard = threading.Lock()  # kept for snapshot-then-mutate sections
 
 # Exit once the analysis queue drains (and systemd restarts us fresh):
@@ -169,9 +179,17 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
 
     # onMessage / onClose come from WsMessageMixin (shared across both services).
 
+    def _authorised(self, data):
+        if ticket_allows(redis_client._redis(), data.get('ticket'), data.get('sessiondeviceid')):
+            return True
+        self.send_json({'type': 'error', 'message': 'Not authorised for this pod.'})
+        return False
+
     def process_json(self, data):
         if not 'type' in data:
             logging.warning('Message does not contain "type".')
+            return
+        if data['type'] in _TICKETED_TYPES and not self._authorised(data):
             return
         
         if data['type'] == 'save-audio-video-fingerprinting':
@@ -478,7 +496,8 @@ if __name__ == '__main__':
     auth_connections.start(5.0)
     factory = WebSocketServerFactory()
     factory.protocol = ServerProtocol
-    reactor.listenTCP(int(os.environ.get("DC_VIDEO_POSTHOC_WS_PORT", 9004)), factory)
+    # Loopback only: nginx and the API's queue connect via 127.0.0.1.
+    reactor.listenTCP(int(os.environ.get("DC_VIDEO_POSTHOC_WS_PORT", 9004)), factory, interface='127.0.0.1')
     logging.info('Video Posthoc Processing Service started.')
     reactor.run()
     logging.info('Video Posthoc Processing Service ended.')

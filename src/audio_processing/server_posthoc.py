@@ -70,6 +70,17 @@ import redis_client
 from pod_registry import PodRegistry
 running_audio_processes = PodRegistry(redis_factory=redis_client._redis,
                                       prefix='audio-posthoc:')
+# Any message that names a pod must carry a ticket the API minted for THAT pod
+# (common/posthoc_ticket): this socket is reachable by anyone through nginx,
+# and a start wipes the pod's previous analysis.
+from posthoc_ticket import ticket_allows
+_TICKETED_TYPES = frozenset((
+    'Initialize_audio_processing_analytics',
+    'Initialize_participation_and_impact_style_computation',
+    'Initialize_expressing_and_thinking_style_computation',
+    'cancel_posthoc',
+    'query_posthoc_status',
+))
 # Kept only for the few multi-op sections that snapshot-then-mutate; the
 # registry is internally locked, so single ops don't need it.
 _running_guard = threading.Lock()
@@ -102,9 +113,17 @@ class ServerProtocol(WsMessageMixin, WebSocketServerProtocol):
 
     # onMessage / onClose come from WsMessageMixin (shared across both services).
 
+    def _authorised(self, data):
+        if ticket_allows(redis_client._redis(), data.get('ticket'), data.get('sessiondeviceid')):
+            return True
+        self.send_json({'type': 'error', 'message': 'Not authorised for this pod.'})
+        return False
+
     def process_json(self, data):
         if not 'type' in data:
             logging.warning('Message does not contain "type".')
+            return
+        if data['type'] in _TICKETED_TYPES and not self._authorised(data):
             return
         
         if data['type'] == 'Initialize_audio_processing_analytics':
@@ -573,7 +592,8 @@ if __name__ == '__main__':
     auth_connections.start(5.0)
     factory = WebSocketServerFactory()
     factory.protocol = ServerProtocol
-    reactor.listenTCP(int(os.environ.get("DC_AUDIO_POSTHOC_WS_PORT", 9005)), factory)
+    # Loopback only: nginx and the API's queue connect via 127.0.0.1.
+    reactor.listenTCP(int(os.environ.get("DC_AUDIO_POSTHOC_WS_PORT", 9005)), factory, interface='127.0.0.1')
     logging.info('Audio Posthoc Processing Service started.')
     callbacks.post_service_restarted('audio')
     reactor.run()
