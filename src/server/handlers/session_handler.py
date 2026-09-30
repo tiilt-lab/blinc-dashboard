@@ -8,14 +8,19 @@ import json
 from device_commands import ConnectionManager
 from redis_helper import RedisSessions
 import posthoc_queue
+import negotiation_coding
 
-def create_session(user_id, name, devices, keyword_list_id, topic_model_id, byod, features, doa, folder, asr=None, live_video_analytics=True):
+def create_session(user_id, name, devices, keyword_list_id, topic_model_id, byod, features, doa, folder, asr=None, live_video_analytics=True, negotiation_coding_enabled=False):
     session, keywords = database.create_session(user_id, keyword_list_id, topic_model_id, name, folder)
     # "Record now, analyse later" for video: only an explicit False turns the
     # live pipeline off; None (older callers) keeps the historic behaviour.
     live_video_analytics = live_video_analytics is not False
     if session.live_video_analytics != live_video_analytics:
         session.live_video_analytics = live_video_analytics
+        database.save_changes()
+    # Negotiation class: end_session queues an LLM coding run per pod.
+    if bool(negotiation_coding_enabled) != bool(session.negotiation_coding):
+        session.negotiation_coding = bool(negotiation_coding_enabled)
         database.save_changes()
     if byod:
         session = database.generate_session_passcode(session.id)
@@ -74,6 +79,11 @@ def end_session(session_id):
     # not stop the session from ending.
     if session.live_video_analytics is False:
         queue_deferred_video_analysis(session, session_devices)
+    # Negotiation classes: the per-utterance LLM coding is queued now, one
+    # coding leg per pod with transcripts (no GPU: it runs beside the next
+    # class). Best effort, like the video legs.
+    if session.negotiation_coding:
+        queue_negotiation_coding(session, session_devices)
 
     # Ping pod devices to stop session
     devices_to_ping = database.get_devices(ids=[session_device.device_id for session_device in session_devices if session_device.device_id is not None])
@@ -131,6 +141,24 @@ def queue_deferred_video_analysis(session, session_devices, recordings_dir=None)
     logging.info('session %s ended record-only: queued post-hoc video analysis for pods %s (already queued: %s)',
                  session.id, added, sorted(set(pods) - set(added)))
     return added
+
+
+def queue_negotiation_coding(session, session_devices):
+    """End of a negotiation_coding session: a coding run per pod that has
+    transcripts (legs=('coding',) on the post-hoc queue). Returns
+    [(pod id, run id)] queued."""
+    queued = []
+    for session_device in session_devices:
+        try:
+            if not database.session_device_transcript_count(session_device.id):
+                continue
+            run = negotiation_coding.queue_coding_run(session.id, session_device.id)
+            queued.append((session_device.id, run.id))
+        except Exception:
+            logging.exception('session %s: could not queue negotiation coding for pod %s',
+                              session.id, session_device.id)
+    logging.info('session %s ended: queued negotiation coding for (pod, run) %s', session.id, queued)
+    return queued
 
 
 def byod_join_session(name, passcode, collaborators):
