@@ -4,6 +4,7 @@ from sqlalchemy import and_, or_
 from sqlalchemy.sql.expression import func
 from datetime import datetime, timedelta, timezone
 import random
+import math
 import hashlib
 import secrets
 import passcode_words
@@ -206,11 +207,25 @@ def add_speaker_transcript_metrics(speaker_id, transcript_id, participation_scor
     db.session.commit()
     return metrics
 
+def add_speaker_transcript_metrics_batch(transcript_id, rows):
+    # rows: iterable of dicts with the SpeakerTranscriptMetrics fields except
+    # transcript_id. One commit per callback; JSON built before the commit.
+    metrics = [SpeakerTranscriptMetrics(r['speaker_id'], transcript_id, r['participation_score'],
+                                        r['internal_cohesion'], r['responsivity'], r['social_impact'],
+                                        r['newness'], r['communication_density']) for r in rows]
+    if not metrics:
+        return []
+    db.session.add_all(metrics)
+    db.session.flush()
+    payload = [m.json() for m in metrics]
+    db.session.commit()
+    return payload
+
 # -------------------------
 # Video Metrics
 # -------------------------
 
-def get_speaker_video_metrics(id = None, student_username=None, session_id=None, session_device_id=None):
+def get_speaker_video_metrics(id = None, student_username=None, session_id=None, session_device_id=None, after_id=None):
     query = db.session.query(SpeakerVideoMetrics).order_by(SpeakerVideoMetrics.time_stamp.asc())
     if session_id is not None:
         query = query.join(SessionDevice).filter(SessionDevice.session_id == session_id)
@@ -220,6 +235,10 @@ def get_speaker_video_metrics(id = None, student_username=None, session_id=None,
         query = query.filter(SpeakerVideoMetrics.student_username == student_username)
     if session_device_id is not None:
         query = query.filter(SpeakerVideoMetrics.session_device_id == session_device_id)
+    if after_id is not None:
+        # Incremental fetch for the 2 s pollers / socket rejoin: only rows
+        # newer than the caller's last-seen id (ids are monotonic).
+        query = query.filter(SpeakerVideoMetrics.id > after_id)
     return query.all()
 
 def get_speaker_video_metrics_by_session_alias(session_id=None, student_username=None,device_id=None):
@@ -241,6 +260,36 @@ def add_speaker_video_metrics(session_device_id,student_username, time_stamp, fa
     db.session.add(metrics)
     db.session.commit()
     return metrics
+
+def add_speaker_video_metrics_batch(session_device_id, rows):
+    # rows: iterable of (student_username, time_stamp, facial_emotion,
+    # attention_level, object_on_focus). One commit per callback instead of
+    # one per row, and idempotent on (device, time_stamp, username) so a
+    # retried POST (processor-side retry queue) does not stack duplicates.
+    # Returns the JSON of the rows actually inserted, built BEFORE the commit
+    # so no row is re-SELECTed on expiry.
+    rows = [(str(u), _as_int(ts), fe, al, obj) for (u, ts, fe, al, obj) in rows]
+    if not rows:
+        return []
+    existing = set(db.session.query(SpeakerVideoMetrics.student_username, SpeakerVideoMetrics.time_stamp)
+                   .filter(SpeakerVideoMetrics.session_device_id == session_device_id,
+                           SpeakerVideoMetrics.time_stamp.in_({r[1] for r in rows}),
+                           SpeakerVideoMetrics.student_username.in_({r[0] for r in rows}))
+                   .all())
+    new_rows = []
+    for (username, time_stamp, facial_emotion, attention_level, object_on_focus) in rows:
+        if (username, time_stamp) in existing:
+            continue
+        existing.add((username, time_stamp))  # also dedupes within the batch
+        new_rows.append(SpeakerVideoMetrics(session_device_id, username, time_stamp,
+                                            facial_emotion, attention_level, object_on_focus))
+    if not new_rows:
+        return []
+    db.session.add_all(new_rows)
+    db.session.flush()  # assigns ids
+    payload = [row.json() for row in new_rows]
+    db.session.commit()
+    return payload
 
 # -------------------------
 # Heart-rate Metrics (Polar straps streamed from the join page)
@@ -852,11 +901,46 @@ def create_pod_session_device(session_id, device_id):
 # Transcript
 # -------------------------
 
-def add_transcript(session_device_id, start_time, length, transcript, question, direction, emotional_tone, analytic_thinking, clout, authenticity, certainty, topic_id ,tag, speaker_id, voice_features=None):
-    transcript = Transcript(session_device_id, start_time, length, transcript, question, direction, emotional_tone, analytic_thinking, clout, authenticity, certainty, topic_id, tag, speaker_id, voice_features=voice_features)
+def _as_int(value):
+    # The processors post float seconds; the columns are INT and MySQL rounds
+    # half away from zero on insert. Doing the same here keeps the stored
+    # value unchanged AND makes the natural-key lookup below match it
+    # (comparing an INT column to 10.2 never matches; Python's round() would
+    # disagree with MySQL on exact .5, which Google's 100 ms word timings hit).
+    if value is None:
+        return None
+    value = float(value)
+    return int(math.floor(value + 0.5)) if value >= 0 else -int(math.floor(-value + 0.5))
+
+def add_transcript(session_device_id, start_time, length, transcript, question, direction, emotional_tone, analytic_thinking, clout, authenticity, certainty, topic_id ,tag, speaker_id, voice_features=None, keywords=None):
+    # keywords: optional [{'word','keyword','similarity'}] stored in the same
+    # commit as the transcript (was one commit per keyword usage).
+    transcript = Transcript(session_device_id, _as_int(start_time), _as_int(length), transcript, question, direction, emotional_tone, analytic_thinking, clout, authenticity, certainty, topic_id, tag, speaker_id, voice_features=voice_features)
+    for k in keywords or []:
+        transcript.keywords.append(KeywordUsage(None, k['word'], k['keyword'], k['similarity']))
     db.session.add(transcript)
     db.session.commit()
     return transcript
+
+def find_transcript(session_device_id, start_time, length, transcript=None):
+    # Natural key used for idempotent ingest: a retried callback re-posts the
+    # same (device, start, length). The text is compared too because the key
+    # is second-granular and two short utterances can round to the same span.
+    query = db.session.query(Transcript).filter(
+        Transcript.session_device_id == session_device_id,
+        Transcript.start_time == _as_int(start_time),
+        Transcript.length == _as_int(length))
+    if transcript is not None:
+        query = query.filter(Transcript.transcript == transcript)
+    return query.order_by(Transcript.id.asc()).first()
+
+def get_or_add_transcript(session_device_id, start_time, length, transcript, *args, **kwargs):
+    # (transcript, created). The existing row wins so a processor retry after
+    # a lost response gets the id it needs instead of a duplicate row.
+    existing = find_transcript(session_device_id, start_time, length, transcript)
+    if existing is not None:
+        return existing, False
+    return add_transcript(session_device_id, start_time, length, transcript, *args, **kwargs), True
 
 def update_transcript_features_batch(session_device_id, updates):
     # Overwrite the five E&T feature values on existing transcript rows (used
@@ -889,7 +973,7 @@ def set_speaker_tag(transcript, tag):
 def get_transcript(id):
     return db.session.query(Transcript).filter(Transcript.id == id).first()
 
-def get_transcripts(session_id=None, session_device_id=None, start_time=0, end_time=-1, speaker_id = -1):
+def get_transcripts(session_id=None, session_device_id=None, start_time=0, end_time=-1, speaker_id = -1, after_id=None):
     query = db.session.query(Transcript).order_by(Transcript.start_time.asc())
     if session_id is not None:
         # Join is required: filtering on SessionDevice without it produces a
@@ -904,6 +988,10 @@ def get_transcripts(session_id=None, session_device_id=None, start_time=0, end_t
         query = query.filter(Transcript.start_time < end_time)
     if speaker_id != -1:
         query = query.filter(Transcript.speaker_id == speaker_id)
+    if after_id is not None:
+        # Incremental fetch (?after_id= / socket rejoin): ids are monotonic,
+        # so this is "everything newer than what the caller already has".
+        query = query.filter(Transcript.id > after_id)
 
     return query.all()
 
@@ -1542,8 +1630,12 @@ def update_synthesized_feedback_report(id, sessionId=None, sessionDeviceId=None,
 def get_session_ids_with_video(owner_id=None, session_ids=None):
     # One query returning the set of session ids that have any video metrics,
     # so the sessions list can flag video without a per-session query.
-    query = db.session.query(SessionDevice.session_id) \
-        .join(SpeakerVideoMetrics, SpeakerVideoMetrics.session_device_id == SessionDevice.id)
+    # EXISTS probes the (device, time) index once per device; the old JOIN
+    # walked every speaker_video_metrics row (~257k) for a DISTINCT.
+    query = db.session.query(SessionDevice.session_id).filter(
+        db.session.query(SpeakerVideoMetrics.id)
+        .filter(SpeakerVideoMetrics.session_device_id == SessionDevice.id)
+        .exists())
     if owner_id is not None:
         query = query.join(Session, SessionDevice.session_id == Session.id) \
             .filter(Session.owner_id == owner_id)

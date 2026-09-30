@@ -11,8 +11,32 @@ import config as cf
 import requests
 from handlers import callback_handlers
 import posthoc_state
+from datetime import datetime, timezone
 
 api_routes = Blueprint('callback', __name__)
+
+# Latest connect time per session_device id. The processors replay failed
+# callbacks with backoff for up to 10 minutes, so a 'disconnect' can land
+# after the same pod has already reconnected; one older than the latest
+# connect must not flip a live pod offline. Process-local: after a restart
+# the check simply does not apply and the callback behaves as before.
+_last_connect_time = {}
+
+
+def _event_time(content):
+    # Payload 'time' is str(naive-UTC datetime) from callbacks_common; an
+    # epoch number is accepted too. None when absent or unparseable.
+    value = (content or {}).get('time')
+    if value is None:
+        return None
+    try:
+        return datetime.fromtimestamp(float(value), timezone.utc).replace(tzinfo=None)
+    except (TypeError, ValueError, OverflowError):
+        pass
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
 
 # The processing services on this host are the only callers (their config
 # points at 127.0.0.1:5001); ProxyFix pins remote_addr to the real client for
@@ -31,6 +55,10 @@ def device_connected(**kwargs):
 
   # Update websockets
   if session_device:
+    event_time = _event_time(content)
+    if event_time is not None:
+      previous = _last_connect_time.get(session_device.id)
+      _last_connect_time[session_device.id] = event_time if previous is None else max(previous, event_time)
     session_device.connected = True
     database.save_changes()
     room_name = str(session_device.session_id)
@@ -52,6 +80,13 @@ def device_disconnected(**kwargs):
 
   # Update websockets
   if session_device:
+    event_time = _event_time(content)
+    last_connect = _last_connect_time.get(session_device.id)
+    if (session_device.connected and event_time is not None
+            and last_connect is not None and event_time < last_connect):
+      logging.info('Ignoring stale disconnect for session device %d (%s predates connect at %s).',
+                   session_device.id, event_time, last_connect)
+      return json_response()
     session_device.connected = False
     session_device.button_pressed = False
     database.save_changes()
@@ -188,17 +223,18 @@ def _parse_transcript_payload(content):
 
 
 def _persist_transcript(session_device, p):
-    # Store the transcript row plus its keyword usages; returns the transcript.
-    transcript = database.add_transcript(
+    # Store the transcript row plus its keyword usages in ONE commit; returns
+    # (transcript, created). Idempotent on the natural key (device, start,
+    # length [+ text]): the processors retry a failed POST with the same
+    # payload (X-Idempotency-Key), and the retry must get the existing row's
+    # id back with 200 rather than insert a duplicate.
+    return database.get_or_add_transcript(
         session_device.id, p['start_time'], p['end_time'] - p['start_time'],
         p['transcript'], len(p['questions']) > 0, p['direction'],
         p['emotional_tone'], p['analytic_thinking'], p['clout'],
         p['authenticity'], p['certainty'], p['topic_id'],
-        p['speaker_tag'], p['speaker_id'], voice_features=p['voice_features'])
-    for keyword in p['keywords']:
-        database.add_keyword_usage(transcript.id, keyword['word'],
-                                   keyword['keyword'], keyword['similarity'])
-    return transcript
+        p['speaker_tag'], p['speaker_id'], voice_features=p['voice_features'],
+        keywords=p['keywords'])
 
 
 @api_routes.route('/api/v1/callback/transcript', methods=['POST'])
@@ -209,9 +245,14 @@ def add_transcript(**kwargs):
     session_device = database.get_session_devices(processing_key=p['key'])
     if session_device:
         logging.info('Transcript received for session device {0} on session {1}.'.format(session_device.id, session_device.session_id))
-        transcript = _persist_transcript(session_device, p)
-        room_name = str(session_device.session_id)
-        socketio.emit('transcript_update', json.dumps(transcript.json()), room=room_name, namespace="/session")
+        transcript, created = _persist_transcript(session_device, p)
+        if created:
+            room_name = str(session_device.session_id)
+            socketio.emit('transcript_update', json.dumps(transcript.json()), room=room_name, namespace="/session")
+        else:
+            # Retry of an already-stored row: no second push to the browsers.
+            logging.info('Duplicate transcript callback for session device %d (transcript %d).',
+                         session_device.id, transcript.id)
         res = {'transcript_id': transcript.id}
     return json_response(payload=res)
 
@@ -238,21 +279,25 @@ def add_speaker_transcript_metrics(**kwargs):
     if session_device:
         logging.info("Speaker Metrics received for session device %s for session %s." %
                      (session_device.id, session_device.session_id))
-        transcript = _persist_transcript(session_device, p)
+        transcript, created = _persist_transcript(session_device, p)
         room_name = str(session_device.session_id)
-        metrics = []
-        for i in range(0, len(participation_scores)):
-            row_speaker_id = speakers[i-1] if i != 0 else None
-            metric = database.add_speaker_transcript_metrics(speaker_id=row_speaker_id,
-                                                    transcript_id=transcript.id,
-                                                    participation_score=participation_scores[i],
-                                                    internal_cohesion=internal_cohesion[i],
-                                                    responsivity=responsivity[i],
-                                                    social_impact=social_impact[i],
-                                                    newness=newness[i],
-                                                    communication_density=communication_density[i])
-            metrics.append(metric.json())
-        socketio.emit('transcript_metrics_update', json.dumps({'transcript':transcript.json(), 'speaker_metrics':metrics}), room=room_name, namespace="/session")
+        # A retry whose first attempt died between the transcript commit and
+        # the metrics commit still needs its metrics; one that already has
+        # them is a pure duplicate.
+        if created or not database.get_speaker_transcript_metrics(transcript_id=transcript.id):
+            rows = [{'speaker_id': speakers[i-1] if i != 0 else None,
+                     'participation_score': participation_scores[i],
+                     'internal_cohesion': internal_cohesion[i],
+                     'responsivity': responsivity[i],
+                     'social_impact': social_impact[i],
+                     'newness': newness[i],
+                     'communication_density': communication_density[i]}
+                    for i in range(0, len(participation_scores))]
+            metrics = database.add_speaker_transcript_metrics_batch(transcript.id, rows)
+            socketio.emit('transcript_metrics_update', json.dumps({'transcript':transcript.json(), 'speaker_metrics':metrics}), room=room_name, namespace="/session")
+        else:
+            logging.info('Duplicate speaker-metrics callback for session device %d (transcript %d).',
+                         session_device.id, transcript.id)
         res = {'transcript_id': transcript.id}
     return json_response(payload=res)
 
@@ -313,15 +358,16 @@ def add_speaker_video_metrics(**kwargs):
                  (session_device.id, session_device.session_id))
     
     room_name = str(session_device.session_id)
-    added_metrics = []
-    for persion_id in video_metrics:
-      for metric in video_metrics[persion_id]:
-        time_stamp, facial_emotion,attention_level,object_on_focus = metric
-        added_metric = database.add_speaker_video_metrics(session_device.id,persion_id,time_stamp, facial_emotion,attention_level,object_on_focus)
-
-        added_metrics.append(added_metric.json())
-    
-    socketio.emit('video_metrics_update', json.dumps({'speaker_video_metrics':added_metrics}), room=room_name, namespace="/session")
+    rows = []
+    for person_id in video_metrics:
+      for metric in video_metrics[person_id]:
+        time_stamp, facial_emotion, attention_level, object_on_focus = metric
+        rows.append((person_id, time_stamp, facial_emotion, attention_level, object_on_focus))
+    # One commit per callback, idempotent on (device, time_stamp, username):
+    # a retried POST only inserts (and pushes) the rows that are still missing.
+    added_metrics = database.add_speaker_video_metrics_batch(session_device.id, rows)
+    if added_metrics:
+      socketio.emit('video_metrics_update', json.dumps({'speaker_video_metrics':added_metrics}), room=room_name, namespace="/session")
       
   return json_response()
 

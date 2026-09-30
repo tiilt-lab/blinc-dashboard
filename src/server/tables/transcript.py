@@ -17,7 +17,8 @@ class Transcript(db.Model):
     certainty_value = db.Column(db.Integer)
     topic_id = db.Column(db.Integer)
     speaker_tag = db.Column(db.String(64), index=True)
-    speaker_id = db.Column(db.Integer)
+    # get_transcripts(speaker_id=) scanned the table (migration f8ae4e72c79c).
+    speaker_id = db.Column(db.Integer, index=True)
     # JSON blob of per-utterance voice features (prosody #6 + vocal emotion #5),
     # nullable. Requires migration; older rows read as None.
     voice_features = db.Column(db.Text, nullable=True)

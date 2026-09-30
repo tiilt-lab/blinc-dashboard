@@ -15,6 +15,11 @@ class Session(db.Model):
 
     keywords = db.relationship("Keyword", lazy='joined', uselist=True)
 
+    # passcode: the anonymous join lookup; (owner_id, creation_date): the
+    # per-owner sessions list order (migration f8ae4e72c79c).
+    __table_args__ = (db.Index('ix_session_passcode', 'passcode'),
+                      db.Index('ix_session_owner_created', 'owner_id', 'creation_date'))
+
     NAME_MAX_LENGTH = 64
     NAME_CHARS = 'a-zA-Z0-9\': '
     PASSCODE_MAX_LENGTH = 64

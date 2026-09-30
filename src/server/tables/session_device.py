@@ -31,7 +31,10 @@ class SessionDevice(db.Model):
 
     # Must live in __table_args__ — as a bare class-body expression the
     # constraint object was discarded and no constraint ever existed.
-    __table_args__ = (UniqueConstraint('session_id', 'name', name='unique_session_name'),)
+    __table_args__ = (UniqueConstraint('session_id', 'name', name='unique_session_name'),
+                      # Looked up on every pod request and callback; UNIQUE so
+                      # a key can never resolve to two pods (migration f8ae4e72c79c).
+                      db.Index('ux_sd_processing_key', 'processing_key', unique=True))
 
     KEY_MAX_LENGTH = 64
     NAME_MAX_LENGTH = 64

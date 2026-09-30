@@ -4,11 +4,11 @@ import subprocess
 import threading
 from utility import sanitize, string_to_bool, json_response, safe_name
 from tables.session_device import SessionDevice
-from redis_helper import RedisSessions
+from redis_helper import RedisSessions, RedisPosthocTicket
 from tables.session import Session
 from utility import batch_video_metrics,batch_transcript_metrics,batch_transcript_video_metrics,synthesized_transcript_video_metrics_by_window
 from metrics_windowing import fmt_start_time
-from app import socketio
+from app import socketio, limiter
 import logging
 import database
 import utility
@@ -45,6 +45,29 @@ _synthesis_write_lock = threading.Lock()
 # id. Delegates to the central resource-authz layer so the membership rule
 # lives in one place (authz.device_in_session).
 _device_in_session = authz.device_in_session
+
+
+def _after_id():
+    # ?after_id=<int>: incremental fetch, only rows with id > after_id (the 2 s
+    # pollers were re-downloading each pod's full history). Absent or
+    # non-numeric means the full history, exactly as before.
+    return request.args.get('after_id', type=int)
+
+
+def _has_pod_key():
+    # Rate-limit exemption for key-bearing calls: a BYOD classroom sits behind
+    # one NAT and every phone polls its pod every 2 s, so a per-IP cap would
+    # starve it; without a valid key verify_device_read_access 404s anyway.
+    return bool(request.headers.get('X-Processing-Key') or request.args.get('key'))
+
+
+# Per-IP brake on the account-less read routes (audit D.C3). Ids are
+# sequential, so this only slows enumeration; keeping the routes open is a
+# product decision that is not changed here. The 2 s pollers (student
+# dashboard, expert rating: ~30/min per open tab) get a ceiling sized for a
+# NAT'd classroom; one-shot lookups get a tighter one.
+ANON_POLL_LIMIT = "600 per minute"
+ANON_LOOKUP_LIMIT = "120 per minute"
 
 @api_routes.route('/api/v1/sessions', methods=['GET'])
 @wrappers.verify_login(public=True)
@@ -94,6 +117,7 @@ def get_session(session, **kwargs):
     return json_response(session.json())
 
 @api_routes.route('/api/v1/sessions/student/passcode/<string:passcode>', methods=['GET'])
+@limiter.limit(ANON_LOOKUP_LIMIT)
 def get_session_by_passcode(passcode, **kwargs):
     sessions = database.get_sessions(passcode=passcode, active=True)
     if sessions:
@@ -102,6 +126,7 @@ def get_session_by_passcode(passcode, **kwargs):
         return json_response({'message': 'Session  not found.'}, 404)
 
 @api_routes.route('/api/v1/sessions/student/sessionid/<int:session_id>', methods=['GET'])
+@limiter.limit(ANON_LOOKUP_LIMIT)
 def get_session_by_id(session_id, **kwargs):
     session = database.get_sessions(id=session_id)
     if session:
@@ -110,6 +135,7 @@ def get_session_by_id(session_id, **kwargs):
         return json_response({'message': 'Session  not found.'}, 404)
 
 @api_routes.route('/api/v1/sessions/student/alias/<string:alias>', methods=['GET'])
+@limiter.limit(ANON_LOOKUP_LIMIT)
 def get_sessions_by_alias(alias, **kwargs):
     sessions = database.get_Session_by_alias(alias=alias)
     if sessions:
@@ -118,6 +144,7 @@ def get_sessions_by_alias(alias, **kwargs):
         return json_response({'message': 'Session  not found.'}, 404)
     
 @api_routes.route('/api/v1/sessions/sessionid/<int:session_id>/student/alias/<string:alias>', methods=['GET'])
+@limiter.limit(ANON_LOOKUP_LIMIT)
 def get_session_device_by_alias(session_id,alias, **kwargs):
     sessionsDevices = database.get_Session_device_by_alias(session_id=session_id,alias=alias)
     if sessionsDevices:
@@ -702,7 +729,7 @@ def end_session(session_id, **kwargs):
 @wrappers.verify_login(public=True)
 @wrappers.verify_session_read_access
 def session_device_transcripts(session_id, device_id, **kwargs):
-    transcripts = database.get_transcripts(session_device_id=device_id)
+    transcripts = database.get_transcripts(session_device_id=device_id, after_id=_after_id())
     return json_response([transcript.json() for transcript in transcripts])
 
 # Guarded by device rather than session: the URL names no session_id, so the
@@ -725,8 +752,9 @@ def speaker_id_transcripts_for(device_id, speaker_id, **kwargs):
 # gate here must come with a credential those flows can hold — a product
 # decision, not a missing decorator.
 @api_routes.route('/api/v1/devices/<int:device_id>/transcripts/client', methods=['GET'])
+@limiter.limit(ANON_POLL_LIMIT)
 def session_device_transcripts_for_client(device_id, **kwargs):
-    transcripts = database.get_transcripts(session_device_id=device_id)
+    transcripts = database.get_transcripts(session_device_id=device_id, after_id=_after_id())
     return json_response([transcript.json() for transcript in transcripts])
 
 
@@ -743,20 +771,23 @@ def _with_speaker_metrics(transcripts):
 
 
 @api_routes.route('/api/v1/devices/<int:device_id>/transcriptspeakermetrics/client', methods=['GET'])
+@limiter.limit(ANON_POLL_LIMIT, exempt_when=_has_pod_key)
 @wrappers.verify_device_read_access
 def session_device_transcript_speaker_metrics_for_client(device_id, **kwargs):
-    transcripts = database.get_transcripts(session_device_id=device_id)
+    transcripts = database.get_transcripts(session_device_id=device_id, after_id=_after_id())
     return json_response(_with_speaker_metrics(transcripts))
 
 @api_routes.route('/api/v1/devices/<int:device_id>/videometrics/client', methods=['GET'])
+@limiter.limit(ANON_POLL_LIMIT, exempt_when=_has_pod_key)
 @wrappers.verify_device_read_access
 def session_device_videometrics_for_client(device_id, **kwargs):
-    videometrics = database.get_speaker_video_metrics(session_device_id=device_id)
+    videometrics = database.get_speaker_video_metrics(session_device_id=device_id, after_id=_after_id())
     return json_response([videometric.json() for videometric in videometrics])
 
 
 @api_routes.route('/api/v1/session/<int:session_id>/transcripts/student/<string:alias>', methods=['GET'])
 @api_routes.route('/api/v1/session/<int:session_id>/sessiondevice/<int:device_id>/transcripts/student/<string:alias>', methods=['GET'])
+@limiter.limit(ANON_POLL_LIMIT)
 def session_transcripts_for_client(session_id, alias, device_id=None, **kwargs):
     transcripts = database.get_transcripts_by_session_alias(session_id=session_id,speaker_tag=alias,device_id=device_id)
     return json_response(_with_speaker_metrics(transcripts))
@@ -764,6 +795,7 @@ def session_transcripts_for_client(session_id, alias, device_id=None, **kwargs):
 
 @api_routes.route('/api/v1/session/<int:session_id>/videometrics/student/<string:alias>', methods=['GET'])
 @api_routes.route('/api/v1/session/<int:session_id>/sessiondevice/<int:device_id>/videometrics/student/<string:alias>', methods=['GET'])
+@limiter.limit(ANON_POLL_LIMIT)
 def session_videometrics_for_client(session_id, alias, device_id=None, **kwargs):
     videoMetrics = database.get_speaker_video_metrics_by_session_alias(session_id=session_id,student_username=alias,device_id=device_id)
     return json_response([videometric.json() for videometric in videoMetrics])
@@ -819,23 +851,37 @@ def session_device(session_id, session_device_id, **kwargs):
             return json_response({'message': 'Session device not found.'}, 404)
         return json_response(session_device.json())
 
+# Memoized for 5 s: every open overview tab polls /devices every 2-8 s and
+# each call was listing ~900 recording files.
+_RECORDINGS_CACHE_TTL = 5.0
+_recordings_cache = (0.0, frozenset())
+_recordings_cache_lock = threading.Lock()
+
+
 def _pod_ids_with_recordings():
     # session_device_ids that have a raw recording file on disk. Short
     # recordings can finish before any transcript or video-metric row lands
     # in the DB, but the recording itself is real data (playable, and
     # post-hoc analyzable) — without this check the overview called such
     # pods "No data" and refused to open them.
-    recordings_dir, _ = _video_dirs()
-    ids = set()
-    try:
-        for fn in os.listdir(recordings_dir):
-            if fn.endswith('.webm') or fn.endswith('.mp4'):
-                prefix = fn.split('-', 1)[0]
-                if prefix.isdigit():
-                    ids.add(int(prefix))
-    except OSError:
-        pass
-    return ids
+    global _recordings_cache
+    with _recordings_cache_lock:
+        stamp, cached = _recordings_cache
+        now = time.monotonic()
+        if now - stamp < _RECORDINGS_CACHE_TTL:
+            return cached
+        recordings_dir, _ = _video_dirs()
+        ids = set()
+        try:
+            for fn in os.listdir(recordings_dir):
+                if fn.endswith('.webm') or fn.endswith('.mp4'):
+                    prefix = fn.split('-', 1)[0]
+                    if prefix.isdigit():
+                        ids.add(int(prefix))
+        except OSError:
+            pass
+        _recordings_cache = (now, frozenset(ids))
+        return _recordings_cache[1]
 
 
 @api_routes.route('/api/v1/sessions/<int:session_id>/devices', methods=['GET'])
@@ -1087,14 +1133,17 @@ def stop_posthoc_queue(session_id, **kwargs):
     cancelled = 0
     try:
         import asyncio, websockets
-        async def _cancel(port, did):
+        async def _cancel(port, did, ticket):
             async with websockets.connect('ws://127.0.0.1:%s' % port, open_timeout=5) as ws:
-                await ws.send(json.dumps({'type': 'cancel_posthoc', 'sessiondeviceid': did}))
+                await ws.send(json.dumps({'type': 'cancel_posthoc', 'sessiondeviceid': did, 'ticket': ticket}))
                 await asyncio.wait_for(ws.recv(), timeout=5)
         for did in list(posthoc_state.running_device_ids()):
+            # The post-hoc sockets now refuse cancel_posthoc without a pod
+            # ticket ("Not authorised for this pod."); one ticket per device.
+            ticket = RedisPosthocTicket.mint(did)
             for port in (os.getenv('DC_AUDIO_POSTHOC_WS_PORT', '9015'), os.getenv('DC_VIDEO_POSTHOC_WS_PORT', '9014')):
                 try:
-                    asyncio.run(_cancel(port, did)); cancelled += 1
+                    asyncio.run(_cancel(port, did, ticket)); cancelled += 1
                 except Exception:
                     pass
             posthoc_state.mark_done(did)
@@ -1111,6 +1160,7 @@ def posthoc_queue_status(session_id, **kwargs):
 
 
 @api_routes.route('/api/v1/students/<username>/longitudinal', methods=['GET'])
+@limiter.limit(ANON_LOOKUP_LIMIT)
 def get_student_longitudinal(username, **kwargs):
     # A student's per-session speaking share + attention across the term.
     # Open like the dashboard's other per-student routes (transcripts/student,
@@ -1122,6 +1172,7 @@ def get_student_longitudinal(username, **kwargs):
 # through this route with no login and no processing key. It returns only
 # device metadata (name, session id), not recorded data.
 @api_routes.route('/api/v1/devices/<int:session_device_id>/session_device', methods=['GET'])
+@limiter.limit(ANON_LOOKUP_LIMIT)
 def session_device_by_id(session_device_id, **kwargs):
     device = database.get_session_devices(id=session_device_id)
     if device is None:

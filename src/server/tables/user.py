@@ -23,6 +23,10 @@ class User(db.Model):
 
     api_client = db.relationship("APIClient", lazy='joined', uselist=False)
 
+    # The register/invite paths check-then-insert; UNIQUE closes that race
+    # (migration f8ae4e72c79c).
+    __table_args__ = (db.Index('ux_user_email', 'email', unique=True),)
+
     EMAIL_MAX_LENGTH = 128
     EMAIL_CHARS = 'a-zA-Z0-9@\':!#$%&*+-/=?^_{|}~.'
     ROLE_MAX_LENGTH = 64
