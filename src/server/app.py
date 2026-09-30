@@ -79,6 +79,17 @@ socketio = SocketIO(app, async_mode='threading', log=logger, cors_allowed_origin
 # Create database
 DATABASE_FILE = os.path.dirname(os.path.abspath(__file__)) + '/discussion_capture.db'
 app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql+mysqlconnector://{0}@localhost:3306/{1}'.format(cf.database_user(), cf.database_name())
+# Pool sized for the threaded server. The defaults (5 + 10 overflow, 30 s wait,
+# no pre-ping) time out once ~15 slow requests hold connections, and hand out a
+# dead connection after a MySQL restart. MySQL max_connections is 151.
+# See docs/infra-audit-2026-09-30.md, "API serving stack".
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+    'pool_size': 20,
+    'max_overflow': 30,
+    'pool_timeout': 10,
+    'pool_recycle': 1800,
+    'pool_pre_ping': True,
+}
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 migrate = Migrate(app, db)

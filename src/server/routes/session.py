@@ -11,6 +11,7 @@ from metrics_windowing import fmt_start_time
 from app import socketio
 import logging
 import database
+import utility
 import json
 import watchers
 from datetime import datetime, timezone
@@ -27,6 +28,9 @@ import os
 import base64
 import queue
 import time
+
+# Below this much free disk, new sessions are refused (see create_session).
+MIN_FREE_DISK_FRACTION = 0.10
 
 api_routes = Blueprint('session', __name__)
 image_queue_dict = {}
@@ -164,6 +168,13 @@ def delete_session(session_id, **kwargs):
 @api_routes.route('/api/v1/sessions', methods=['POST'])
 @wrappers.verify_login(public=True)
 def create_session(user, **kwargs):
+    # The recorders swallow write errors, so a full disk would otherwise give a
+    # session that looks live but records nothing. Refuse to start one instead.
+    free = utility.disk_free_fraction(os.path.dirname(os.path.abspath(__file__)))
+    if free < MIN_FREE_DISK_FRACTION:
+        logging.error('Refusing to start a session: %.1f%% disk free', free * 100)
+        return json_response({'message': 'The server disk is almost full ({0:.0f}% free). '
+                                         'Free up space before starting a session.'.format(free * 100)}, 507)
     name = request.json.get('name', 'Session')
     valid, message = Session.verify_fields(name=name)
     if not valid:

@@ -1,4 +1,5 @@
 # File for generic helper functions.
+import shutil
 from flask import jsonify
 from markupsafe import escape  # flask.escape removed in Flask 2.3
 from collections import Counter,defaultdict
@@ -1109,3 +1110,11 @@ def synthesized_transcript_video_metrics_by_window(transcriptSpeakerMetric,video
     
     
     return Combined_object
+
+
+def disk_free_fraction(path):
+    """Free space on the filesystem holding ``path``, as a fraction of its size.
+    Recordings, logs and the database all live on the one root filesystem
+    today; point this at the recordings volume if they ever move."""
+    usage = shutil.disk_usage(path)
+    return usage.free / usage.total if usage.total else 0.0
