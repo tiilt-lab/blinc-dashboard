@@ -7,10 +7,11 @@ import {
 
 const LEVEL_HELP = {
     viewer: "Can see sessions, metrics, transcripts, audio and video",
-    editor: "Can also add, rename, move and delete sessions and subfolders",
-    manager: "Can also rename, move or delete the folder and share it",
+    editor: "Can also add, rename, move and delete sessions and subfolders, and share it with viewers and editors",
+    manager: "Can also rename, move or delete the folder and share it at any level",
 }
 const LEVELS = ["viewer", "editor", "manager"]
+const RANK = { viewer: 1, editor: 2, manager: 3 }
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1)
 
 // Who can reach a folder, and (for its managers and admins) who to add. Access
@@ -63,6 +64,11 @@ function FolderShareDialog({ folder, me, onClose, onLeft }) {
     }
 
     const canManage = data?.can_manage_members
+    // Editors may hand out viewer/editor only and cannot touch managers;
+    // managers and admins have the full range (server enforces the same).
+    const ceiling = RANK[data?.grant_ceiling] || 0
+    const grantable = LEVELS.filter((l) => RANK[l] <= ceiling)
+    const canTouch = (m) => canManage && !m.inherited_from && RANK[m.level] <= ceiling
     return (
         <div className={dlgWindow} style={{ width: "min(34rem, 86vw)" }}>
             <div className={dlgHeading}>Share “{folder.name}”</div>
@@ -85,7 +91,7 @@ function FolderShareDialog({ folder, me, onClose, onLeft }) {
                             onChange={(e) => setLevel(e.target.value)}
                             className={dlgSelect + " w-auto flex-none"}
                         >
-                            {LEVELS.map((l) => <option key={l} value={l}>{cap(l)}</option>)}
+                            {grantable.map((l) => <option key={l} value={l}>{cap(l)}</option>)}
                         </select>
                         <button type="submit" disabled={busy || !email.trim()} className={btnPrimary + " h-11 disabled:opacity-50"}>
                             Add
@@ -133,7 +139,7 @@ function FolderShareDialog({ folder, me, onClose, onLeft }) {
                                 ) : null}
                             </span>
                             <span className="flex flex-none items-center gap-2">
-                                {canManage && !m.inherited_from ? (
+                                {canTouch(m) ? (
                                     <select
                                         aria-label={`Access level for ${m.email}`}
                                         value={m.level}
@@ -141,12 +147,12 @@ function FolderShareDialog({ folder, me, onClose, onLeft }) {
                                         onChange={(e) => change(m, e.target.value)}
                                         className={dlgSelect + " h-8 w-auto py-0 text-sm"}
                                     >
-                                        {LEVELS.map((l) => <option key={l} value={l}>{cap(l)}</option>)}
+                                        {grantable.map((l) => <option key={l} value={l}>{cap(l)}</option>)}
                                     </select>
                                 ) : (
                                     <span className="text-xs font-semibold text-tiilt-muted">{cap(m.level)}</span>
                                 )}
-                                {!m.inherited_from && (canManage || m.user_id === me?.id) ? (
+                                {!m.inherited_from && (canTouch(m) || m.user_id === me?.id) ? (
                                     <button
                                         disabled={busy}
                                         onClick={() => remove(m)}

@@ -5,10 +5,11 @@ three levels:
 
     viewer   see the folder and everything in it — sessions, metrics,
              transcripts, audio and video
-    editor   viewer, plus create sessions and subfolders in it, and rename,
-             move, re-analyse or delete the sessions inside
-    manager  editor, plus rename, move or delete the folder itself and decide
-             who else is a member
+    editor   viewer, plus create sessions and subfolders in it, rename,
+             move, re-analyse or delete the sessions inside, and share it
+             with others as viewer or editor
+    manager  editor, plus rename, move or delete the folder itself and
+             decide who else is a member at any level
 
 A grant flows down the tree: access to a folder is access to every subfolder
 beneath it, and where a person holds grants at several heights the highest
@@ -109,9 +110,21 @@ def levels_for_all(folders, user, member_levels):
     return result
 
 
+def grant_ceiling(level, user):
+    """The highest level the caller may hand out, change or take away in a
+    folder, or None if they may not share it at all. Managers, admins and
+    supers: any level. Editors: up to editor, so nobody (themselves included)
+    can be raised above their own standing and managers stay out of reach."""
+    if at_least(level, MANAGER) or (user or {}).get('role') in ('admin', 'super'):
+        return MANAGER
+    if at_least(level, EDITOR):
+        return EDITOR
+    return None
+
+
 def can_manage_members(level, user):
-    """Admins organise membership on any folder; otherwise it takes a manager."""
-    return at_least(level, MANAGER) or (user or {}).get('role') in ('admin', 'super')
+    """Whether the caller may share the folder at all (see grant_ceiling)."""
+    return grant_ceiling(level, user) is not None
 
 
 def session_allowed(session, user, write, folder_level):

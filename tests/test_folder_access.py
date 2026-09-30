@@ -154,6 +154,18 @@ def test_session_roles_unchanged():
 
 def test_who_may_manage_members():
     assert fa.can_manage_members(fa.MANAGER, BOB)
-    assert not fa.can_manage_members(fa.EDITOR, BOB)
+    assert fa.can_manage_members(fa.EDITOR, BOB)
+    assert not fa.can_manage_members(fa.VIEWER, BOB)
     assert fa.can_manage_members(fa.VIEWER, ADMIN)
     assert fa.can_manage_members(None, SUPER)
+
+
+def test_grant_ceiling_caps_editors_at_their_own_level():
+    # Editors share as viewer/editor only, so they can neither promote
+    # anyone (themselves included) to manager nor touch a manager's grant.
+    assert fa.grant_ceiling(fa.MANAGER, BOB) == fa.MANAGER
+    assert fa.grant_ceiling(fa.EDITOR, BOB) == fa.EDITOR
+    assert fa.grant_ceiling(fa.VIEWER, BOB) is None
+    assert fa.grant_ceiling(None, BOB) is None
+    assert fa.grant_ceiling(fa.VIEWER, ADMIN) == fa.MANAGER
+    assert fa.grant_ceiling(None, SUPER) == fa.MANAGER

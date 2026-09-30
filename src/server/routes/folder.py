@@ -141,6 +141,8 @@ def _members_json(folder, user, level):
         members=sorted(people.values(), key=order),
         access=level,
         can_manage_members=folder_access.can_manage_members(level, user),
+        # The highest level the caller may grant or change (editor or manager).
+        grant_ceiling=folder_access.grant_ceiling(level, user),
     )
 
 @api_routes.route('/api/folders/<int:folder_id>/members', methods=['GET'])
@@ -158,16 +160,20 @@ def _caller_key():
 @limiter.limit("60 per hour", key_func=_caller_key)
 @wrappers.verify_folder_level(folder_access.VIEWER)
 def set_folder_member(folder, folder_level, user, **kwargs):
-    # Add someone, or change their level. Admins and the folder's managers
-    # only. Existing accounts get a notification email; an address with no
-    # account gets one created and an invite to set its password.
-    if not folder_access.can_manage_members(folder_level, user):
-        return json_response({'message': 'Only a manager of this folder or an admin can share it.'}, 403)
+    # Add someone, or change their level. Editors may share as viewer or
+    # editor; managers and admins at any level. Existing accounts get a
+    # notification email; an address with no account gets one created and an
+    # invite to set its password.
+    ceiling = folder_access.grant_ceiling(folder_level, user)
+    if ceiling is None:
+        return json_response({'message': 'Only an editor or manager of this folder, or an admin, can share it.'}, 403)
     body = request.get_json(silent=True) or {}
     email = (body.get('email') or '').strip()
     level = body.get('level')
     if level not in folder_access.LEVELS:
         return json_response({'message': 'Level must be one of: {0}.'.format(', '.join(folder_access.LEVELS))}, 400)
+    if not folder_access.at_least(ceiling, level):
+        return json_response({'message': 'As an editor you can share this folder as viewer or editor only.'}, 403)
     if not email or '@' not in email:
         return json_response({'message': 'Enter an email address.'}, 400)
     valid, message = User.verify_fields(email=email)
@@ -182,6 +188,8 @@ def set_folder_member(folder, folder_level, user, **kwargs):
     if member.id == folder.owner_id:
         return json_response({'message': 'The owner already manages this folder.'}, 400)
     previous = database.get_folder_member_levels(member.id).get(folder.id)
+    if previous is not None and not folder_access.at_least(ceiling, previous):
+        return json_response({'message': "Only a manager can change another manager's access."}, 403)
     database.set_folder_member(folder.id, member.id, level, granted_by=user['id'])
     if invite_token is None and member.last_login is None:
         # Invited earlier but never signed in: a fresh invite beats a share
@@ -198,9 +206,15 @@ def set_folder_member(folder, folder_level, user, **kwargs):
 @wrappers.verify_login()
 @wrappers.verify_folder_level(folder_access.VIEWER)
 def remove_folder_member(folder, folder_level, user, member_id, **kwargs):
-    # Managers and admins remove anyone; anyone may remove themselves (leave).
-    if member_id != user['id'] and not folder_access.can_manage_members(folder_level, user):
-        return json_response({'message': 'Only a manager of this folder or an admin can change who has access.'}, 403)
+    # Anyone may remove themselves (leave). Otherwise it takes an editor or
+    # better, and an editor cannot remove a manager.
+    if member_id != user['id']:
+        ceiling = folder_access.grant_ceiling(folder_level, user)
+        if ceiling is None:
+            return json_response({'message': 'Only an editor or manager of this folder, or an admin, can change who has access.'}, 403)
+        current = database.get_folder_member_levels(member_id).get(folder.id)
+        if current is not None and not folder_access.at_least(ceiling, current):
+            return json_response({'message': 'Only a manager can remove another manager.'}, 403)
     if not database.remove_folder_member(folder.id, member_id):
         return json_response({'message': 'That person has no direct access to this folder.'}, 404)
     level = wrappers.folder_level(folder.id, user)
