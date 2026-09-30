@@ -1,11 +1,19 @@
 import { SessionService } from "../services/session-service";
-import { ApiService } from "../services/api-service";
 import { DeviceService } from "../services/device-service";
+import { startPolling } from "../globals";
 import { DeviceModel } from "../models/device";
 import { SpeakerModel } from "../models/speaker";
 import { useState, useEffect, useMemo, useRef } from "react";
 import { useNavigate, useOutletContext } from "react-router-dom";
 import { PodsOverviewPages } from "./html-pages";
+
+// Teacher-overview poll cadences. All three loops are chained (never
+// overlapping), pause while the tab is hidden, back off on errors and
+// abort on unmount (audit G.2). Triage went 8 s -> 10 s: its alerts are
+// 30 s-scale signals, so the audit's 5-10 s band is safe there.
+const TRIAGE_POLL_MS = 10000;
+const QUEUE_POLL_MS = 15000;
+const DEVICES_POLL_MS = 15000;
 
 function PodsOverviewComponent(props) {
   const [, setSessionClosing] = useState(false);
@@ -29,23 +37,22 @@ function PodsOverviewComponent(props) {
       for (const id of ids) next[id] = !allOn;
       return next;
     });
-  const loadQueue = (sid) =>
-    new SessionService().getPosthocQueue(sid).then(
-      (r) => {
-        if (r.status === 200)
-          r.json().then((list) => {
-            const m = {};
-            for (const j of list) m[j.device_id] = j.state;
-            setQueueState(m);
-          });
+  // Resolves false on any failure so the poll loop can back off.
+  const loadQueue = (sid, signal) =>
+    new SessionService().getPosthocQueue(sid, { signal }).then(
+      async (r) => {
+        if (r.status !== 200) return false;
+        const list = await r.json();
+        const m = {};
+        for (const j of list) m[j.device_id] = j.state;
+        setQueueState(m);
+        return true;
       },
-      () => {},
+      () => false,
     );
   useEffect(() => {
     if (session === null || !session.id) return;
-    loadQueue(session.id);
-    const t = setInterval(() => loadQueue(session.id), 15000);
-    return () => clearInterval(t);
+    return startPolling((signal) => loadQueue(session.id, signal), QUEUE_POLL_MS);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session]);
 
@@ -54,19 +61,15 @@ function PodsOverviewComponent(props) {
   const [triage, setTriage] = useState({});
   useEffect(() => {
     if (session === null || !session.id || session.ended) return;
-    const load = () =>
-      new ApiService()
-        .httpRequestCall(`api/v1/sessions/${session.id}/triage`, "GET", {})
-        .then((r) => (r.status === 200 ? r.json() : []))
-        .then((list) => {
-          const m = {};
-          for (const p of list) m[p.device_id] = p.alerts;
-          setTriage(m);
-        })
-        .catch(() => {});
-    load();
-    const t = setInterval(load, 8000);
-    return () => clearInterval(t);
+    return startPolling(async (signal) => {
+      const r = await new SessionService().getSessionTriage(session.id, { signal });
+      if (r.status !== 200) return false;
+      const list = await r.json();
+      const m = {};
+      for (const p of list) m[p.device_id] = p.alerts;
+      setTriage(m);
+      return true;
+    }, TRIAGE_POLL_MS);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session]);
   const stopRuns = () => {
@@ -90,24 +93,19 @@ function PodsOverviewComponent(props) {
   useEffect(() => {
     if (session === null || !session.id) return;
     let alive = true;
-    const load = () =>
-      new SessionService().getSessionDevices(session.id).then(
-        (r) => {
-          if (r.status === 200)
-            r.json().then((list) => {
-              if (!alive) return;
-              const map = {};
-              for (const d of list) map[d.id] = d;
-              setEnriched(map);
-            });
-        },
-        () => {},
-      );
-    load();
-    const t = setInterval(load, 15000);
+    const stop = startPolling(async (signal) => {
+      const r = await new SessionService().getSessionDevices(session.id, { signal });
+      if (r.status !== 200) return false;
+      const list = await r.json();
+      if (!alive) return true;
+      const map = {};
+      for (const d of list) map[d.id] = d;
+      setEnriched(map);
+      return true;
+    }, DEVICES_POLL_MS);
     return () => {
       alive = false;
-      clearInterval(t);
+      stop();
     };
   }, [session]);
   const [currentForm, setCurrentForm] = useState("");

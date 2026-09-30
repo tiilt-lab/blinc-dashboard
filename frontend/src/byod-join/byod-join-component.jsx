@@ -19,6 +19,27 @@ import { PolarConnection, isBluetoothSupported } from "../services/polar-hr"
 import fixWebmDuration from "fix-webm-duration"
 import { FEATURE_LABELS, BOX_LABELS, buildChecklist } from "../utilities/checklist"
 import { ensureGetUserMedia } from "../utilities/media"
+import { backoffDelay, mergeById, maxId, startPolling } from "../globals"
+
+// Reconnect policy (audit G.1 / E.2): exponential backoff with full jitter
+// 1 s -> 30 s, giving up after ~3 min (an audio-processor restart is
+// ~70 s). One attempt may hang for at most RECONNECT_ATTEMPT_TIMEOUT_MS.
+const RECONNECT_BASE_MS = 1000
+const RECONNECT_MAX_MS = 30000
+const RECONNECT_DEADLINE_MS = 3 * 60 * 1000
+const RECONNECT_ATTEMPT_TIMEOUT_MS = 25000
+// Backpressure caps: past these a chunk is dropped (and counted) instead
+// of joining a socket queue that only exists in this tab's memory.
+const AUDIO_SEND_CAP_BYTES = 1 * 1024 * 1024
+const VIDEO_SEND_CAP_BYTES = 8 * 1024 * 1024
+// Audio captured while the sockets are down is kept (bounded) and re-sent
+// with its offset on reconnect: ~3 min of 16 kHz float32 mono.
+const AUDIO_BACKLOG_CAP_BYTES = 12 * 1024 * 1024
+// Live poll: 2 s keeps the pod screen live; with after_id most responses
+// are empty. A full re-fetch every FULL_REFRESH_EVERY polls picks up rows
+// changed after insertion (speaker metrics attach later).
+const LIVE_POLL_MS = 2000
+const FULL_REFRESH_EVERY = 15
 
 /*
 BYOD Connection Order
@@ -56,7 +77,25 @@ function JoinPage() {
     const mediaRecorder = useRef(null)
     const source = useRef(null)
     const ending = useRef(false)
-    const reconnectCounter = useRef(0)
+    // Reconnect episode: attempt count, when it started (deadline), the
+    // pending retry timer and the per-attempt watchdog.
+    const reconnect = useRef({ attempt: 0, since: null, timer: null, watchdog: null })
+    // The audio socket came up at least once this join. A ref, not a
+    // per-socket local: a retry whose handshake fails must keep retrying,
+    // not fall to the "couldn't reach the server" dead end.
+    const everOpened = useRef(false)
+    // Kept across reconnects with the AudioContext; frames flow through
+    // sendAudioFrame, which queues them in the backlog while disconnected.
+    const workletNode = useRef(null)
+    const audioBacklog = useRef({ chunks: [], bytes: 0, drainTimer: null })
+    // Mirrors of state for socket callbacks / the worklet (state there is a
+    // stale snapshot).
+    const streamingRef = useRef(false)
+    const readyRef = useRef(false)
+    const dropStats = useRef({ audio: 0, video: 0, lastAt: 0, noticeAt: 0 })
+    // after_id cursors for the live polls.
+    const lastTranscriptId = useRef(0)
+    const lastVideoMetricId = useRef(0)
     const frameBuffer = useRef([]); // Buffer for cartoonized frames
     const playbackIntervalRef = useRef(null);
     const isPlayingBatchRef = useRef(false);
@@ -109,6 +148,8 @@ function JoinPage() {
     useEffect(() => {
         if (currentForm !== "Connecting") return
         const t = setTimeout(() => {
+            // A reconnect episode has its own deadline (scheduleReconnect).
+            if (reconnect.current.since !== null) return
             setDisplayText(
                 "Couldn't connect to the session. Check your internet connection and microphone permission, then try again.",
             )
@@ -192,6 +233,10 @@ function JoinPage() {
     // recording looks fine from the pod, so the pod's own screen is the
     // only place a warning reaches the people who can act on it.
     const [streamWarning, setStreamWarning] = useState(null)
+    // Small non-blocking notices: chunks dropped for backpressure, and the
+    // audio server reporting degraded transcription (asr_status).
+    const [netNotice, setNetNotice] = useState(null)
+    const [asrNotice, setAsrNotice] = useState(null)
     // iOS pins the capture shape to the WINDOW orientation, not the phone's
     // physical one: with the portrait rotation lock on, a phone propped
     // sideways still delivers an upright portrait crop — the wide field of
@@ -267,6 +312,26 @@ function JoinPage() {
         if (!state.startDiscussionStreaming) return
         const t = setInterval(() => setRecSeconds((s) => s + 1), 1000)
         return () => clearInterval(t)
+    }, [state.startDiscussionStreaming])
+
+    // Every channel ready (start acks in) ends a reconnect episode: the
+    // attempt count and deadline reset for the next one.
+    useEffect(() => {
+        const isVideo =
+            joinwith.current === "Video" || joinwith.current === "Videocartoonify"
+        const ready = state.audioReady && (!isVideo || state.videoReady)
+        readyRef.current = ready
+        if (ready) cancelReconnect()
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [state.audioReady, state.videoReady])
+
+    // Streaming resumed after a reconnect: ship the audio captured while
+    // the sockets were down before any live frame (declared before the
+    // worklet effect below so the ref is set when that effect runs).
+    useEffect(() => {
+        streamingRef.current = state.startDiscussionStreaming
+        if (state.startDiscussionStreaming) drainAudioBacklog()
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [state.startDiscussionStreaming])
 
     // Mic watchdog: iOS silently mutes the mic track on audio-route changes
@@ -484,6 +549,13 @@ function JoinPage() {
                 } catch (ex) {
                     console.error("audio context resume failed", ex)
                 }
+                // Reconnects keep the AudioContext and its worklet (the
+                // graph below is built once per join); frames queued while
+                // the sockets were down drain first.
+                if (workletNode.current !== null) {
+                    drainAudioBacklog()
+                    return
+                }
                 // Absolute path: a relative one resolves under /join/<code>
                 // on deep links, 404s into the SPA fallback HTML, and the
                 // worklet silently never loads — no audio ever reached the
@@ -495,13 +567,10 @@ function JoinPage() {
                     audioContext.current,
                     "audio-sender-processor",
                 )
-                workletProcessor.port.onmessage = (data) => {
-                    // The worklet can outlive the socket briefly during
-                    // disconnect/end-recording teardown.
-                    if (audiows.current?.readyState === WebSocket.OPEN) {
-                        audiows.current.send(data.data.buffer)
-                    }
-                }
+                workletNode.current = workletProcessor
+                // 4096 float32 samples per message (~4/s at 16 kHz).
+                workletProcessor.port.onmessage = (data) =>
+                    sendAudioFrame(data.data.buffer)
                 // When a specific channel was picked on the device check
                 // page, feed only that channel to the sender (the worklet
                 // forwards its first input channel); otherwise send the
@@ -599,11 +668,7 @@ function JoinPage() {
                             fixWebmDuration(
                                 ev.data,
                                 interval * 6 * 60 * 24,
-                                (fixedblob) => {
-                                    if (videows.current?.readyState === WebSocket.OPEN) {
-                                        videows.current.send(fixedblob)
-                                    }
-                                },
+                                (fixedblob) => sendVideoChunk(fixedblob),
                             )
                         } else if (ev.data.type.startsWith('video/mp4')) {
                             // Sent as-is: the server-side remux cache fixes
@@ -611,9 +676,7 @@ function JoinPage() {
                             // client-side "repair" used to live here; it had
                             // never worked — its dependency was never loaded
                             // — and silently dropped every mp4 chunk.)
-                            if (videows.current?.readyState === WebSocket.OPEN) {
-                                videows.current.send(ev.data)
-                            }
+                            sendVideoChunk(ev.data)
                         }
 
                     }
@@ -629,28 +692,31 @@ function JoinPage() {
                 videoPlay()
             }
         }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [state.startDiscussionStreaming])
 
 
     // SIXTH LEVEL: THIS EFFECT IS TRIGGERED ONCE THE SPEAKERS ARE VALIDATED AND THE STREAMING HAS STARTED, THIS THEN STARTS THE INTERVAL 
     // TO FETCH THE TRANSCRIPTS AND VIDEO METRICS FROM THE SERVER EVERY 2 SECONDS AND UPDATE THE DISPLAY
     useEffect(() => {
-        let intervalLoad
         // Gate on streaming: this used to poll every 2s the whole time the
         // group idled on the (offline-by-design) speaker page, where no
-        // transcripts can exist yet.
-        if (session !== null && sessionDevice !== null && state.startDiscussionStreaming) {
-            fetchTranscript(sessionDevice.id)
-            fetchVideoMetric(sessionDevice.id)
-            intervalLoad = setInterval(() => {
-                fetchTranscript(sessionDevice.id)
-                fetchVideoMetric(sessionDevice.id)
-            }, 2000)
+        // transcripts can exist yet. Chained (never overlapping),
+        // incremental via after_id, paused while hidden, backed off on
+        // errors, aborted on cleanup (audit G.2).
+        if (session === null || sessionDevice === null || !state.startDiscussionStreaming) {
+            return undefined
         }
-
-        return () => {
-            clearInterval(intervalLoad)
-        }
+        const deviceId = sessionDevice.id
+        let polls = 0
+        return startPolling(async (signal) => {
+            const full = polls++ % FULL_REFRESH_EVERY === 0
+            const [a, b] = await Promise.all([
+                fetchTranscript(deviceId, signal, full),
+                fetchVideoMetric(deviceId, signal, full),
+            ])
+            return a !== false && b !== false
+        }, LIVE_POLL_MS)
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [session, sessionDevice, state.startDiscussionStreaming])
 
@@ -700,8 +766,11 @@ function JoinPage() {
         }
     }
 
-    // Disconnects from websocket server and audio stream.
-    const disconnect = (permanent = false) => {
+    // Disconnects from websocket server and audio stream. keepMedia (the
+    // transient reconnect path) drops only the sockets and the recorder:
+    // the microphone/camera, AudioContext, worklet and wake lock stay up,
+    // so a reconnect needs no new permission prompt and loses no audio.
+    const disconnect = (permanent = false, { keepMedia = false } = {}) => {
         if (ending.current)
             return
         if (permanent && session !== null) {
@@ -742,18 +811,31 @@ function JoinPage() {
             })
             frameBuffer.current = []
             setFrameBufferLength(0)
+            // Nothing may reconnect after a permanent teardown; the audio
+            // backlog and the notices belonged to the connection that ended.
+            cancelReconnect()
+            everOpened.current = false
+            audioBacklog.current = { chunks: [], bytes: 0, drainTimer: null }
+            dropStats.current = { audio: 0, video: 0, lastAt: 0, noticeAt: 0 }
+            setNetNotice(null)
+            setAsrNotice(null)
         }
 
-        releaseWakeLock()
+        if (!keepMedia) {
+            releaseWakeLock()
 
-        if (source.current != null) {
-            source.current.disconnect()
-            source.current = null
+            if (source.current != null) {
+                source.current.disconnect()
+                source.current = null
+            }
+            if (audioContext.current != null) {
+                audioContext.current.close()
+                audioContext.current = null
+            }
+            workletNode.current = null
         }
-        if (audioContext.current != null) {
-            audioContext.current.close()
-            audioContext.current = null
-        }
+        // The recorder always stops: a video fragment is only decodable
+        // from its first chunk, so each connection gets a fresh recorder.
         if (mediaRecorder.current != null) {
             // endRecording stops the recorder before draining the socket;
             // stop() on an inactive recorder throws and would abort the
@@ -768,19 +850,21 @@ function JoinPage() {
             mediaRecorder.current = null
         }
 
-        if (orientationFix.current != null) {
-            orientationFix.current.stop()
-            orientationFix.current = null
-        }
-        if (rawStreamReference.current != null) {
-            rawStreamReference.current.getTracks().forEach((track) => track.stop())
-            rawStreamReference.current = null
-        }
-        if (streamReference.current != null) {
-            // ALL tracks — stopping only audio left the camera light on
-            // after leaving a video pod.
-            streamReference.current.getTracks().forEach((track) => track.stop())
-            streamReference.current = null
+        if (!keepMedia) {
+            if (orientationFix.current != null) {
+                orientationFix.current.stop()
+                orientationFix.current = null
+            }
+            if (rawStreamReference.current != null) {
+                rawStreamReference.current.getTracks().forEach((track) => track.stop())
+                rawStreamReference.current = null
+            }
+            if (streamReference.current != null) {
+                // ALL tracks — stopping only audio left the camera light on
+                // after leaving a video pod.
+                streamReference.current.getTracks().forEach((track) => track.stop())
+                streamReference.current = null
+            }
         }
 
         dispatch({ type: "AUDIO_SOCKET_OPEN", payload: false })
@@ -791,6 +875,15 @@ function JoinPage() {
         // kept so an in-progress recording resumes without re-pressing Start.
         dispatch({ type: "STOP_STREAMING" })
 
+        // Detach the handlers first: these closes are deliberate, and the
+        // other socket's onclose must not start a second reconnect.
+        for (const w of [audiows.current, videows.current]) {
+            if (w) {
+                w.onclose = null
+                w.onmessage = null
+                w.onerror = null
+            }
+        }
         if (audiows.current != null) {
             audiows.current.close();
             audiows.current = null;
@@ -799,6 +892,161 @@ function JoinPage() {
             videows.current.close()
             videows.current = null
         }
+    }
+
+    const cancelReconnect = () => {
+        const r = reconnect.current
+        clearTimeout(r.timer)
+        clearTimeout(r.watchdog)
+        r.timer = null
+        r.watchdog = null
+        r.attempt = 0
+        r.since = null
+    }
+
+    // Either socket dropped mid-session: drop both, keep the media, retry
+    // with backoff until the deadline. Both channels are re-opened
+    // together because the fingerprints and roster are replayed to both
+    // services on every connection (video alone cannot be re-validated).
+    const scheduleReconnect = (why) => {
+        const r = reconnect.current
+        if (ending.current || r.timer !== null) return
+        if (r.since === null) r.since = Date.now()
+        clearTimeout(r.watchdog)
+        r.watchdog = null
+        if (Date.now() - r.since > RECONNECT_DEADLINE_MS) {
+            console.error("reconnect deadline passed (" + why + ")")
+            setDisplayText("Connection to the session has been lost.")
+            setCurrentForm("ClosedSession")
+            disconnect(true)
+            return
+        }
+        console.warn("session " + why + " socket closed; reconnect attempt " + (r.attempt + 1))
+        disconnect(false, { keepMedia: true })
+        // The new server connection starts with no speaker fingerprints —
+        // they are all queued client-side, so the reconnect replays them
+        // (no bouncing the group back to the speaker page).
+        dispatch({ type: "SPEAKERS_VALIDATED", payload: false })
+        replayDone.current = false
+        setCurrentForm("Connecting")
+        const delay = backoffDelay(r.attempt, RECONNECT_BASE_MS, RECONNECT_MAX_MS)
+        r.attempt += 1
+        r.timer = setTimeout(() => {
+            r.timer = null
+            if (ending.current) return
+            handleStreamRef.current()
+            // A handshake or start ack that hangs fires no onclose; force
+            // the next attempt instead of stalling the loop.
+            r.watchdog = setTimeout(() => {
+                r.watchdog = null
+                if (readyRef.current || ending.current) return
+                console.warn("reconnect attempt timed out; retrying")
+                const sockets = [audiows.current, videows.current].filter(Boolean)
+                for (const w of sockets) {
+                    try {
+                        w.close()
+                    } catch {
+                        /* already closing */
+                    }
+                }
+                // No socket to close (handleStream failed before opening
+                // one) means no onclose will come: schedule directly.
+                if (sockets.length === 0) scheduleReconnect("timeout")
+            }, RECONNECT_ATTEMPT_TIMEOUT_MS)
+        }, delay)
+    }
+
+    // Seconds of audio queued while the sockets were down. Sent as
+    // start_time on the restart message: the server places this stream's
+    // first sample that many seconds before "now" (start_offset =
+    // now - server_start - start_time), so the re-sent gap lands where it
+    // was spoken. 0 on a first connection, exactly as before.
+    const audioBacklogSeconds = () => {
+        const rate = audioContext.current ? audioContext.current.sampleRate : 16000
+        return Math.round((audioBacklog.current.bytes / (4 * rate)) * 100) / 100
+    }
+
+    // Drop bookkeeping + the small non-blocking notice (throttled: audio
+    // frames arrive ~4x per second).
+    const noteDrop = (kind) => {
+        const d = dropStats.current
+        d[kind] += 1
+        const now = Date.now()
+        d.lastAt = now
+        if (now - d.noticeAt < 2000) return
+        d.noticeAt = now
+        const n = d.audio + d.video
+        setNetNotice(
+            "Slow network: " + n + (n === 1 ? " chunk" : " chunks") +
+                " of " + kind + " skipped so far. The session continues; " +
+                "move closer to the Wi-Fi if this persists.",
+        )
+    }
+    const clearDropNoticeIfQuiet = () => {
+        const d = dropStats.current
+        if (d.lastAt !== 0 && Date.now() - d.lastAt > 15000) {
+            d.lastAt = 0
+            setNetNotice(null)
+        }
+    }
+
+    // Audio frames go straight out while the socket is open, streaming and
+    // not backed up. Otherwise (reconnect in progress, or a backlog still
+    // draining) they queue in the bounded backlog, oldest dropped and
+    // counted past the cap so what remains is contiguous up to now — which
+    // is what audioBacklogSeconds relies on.
+    const sendAudioFrame = (buf) => {
+        const ws = audiows.current
+        const backlog = audioBacklog.current
+        const live = !!ws && ws.readyState === WebSocket.OPEN && streamingRef.current
+        if (live && backlog.chunks.length === 0) {
+            if (ws.bufferedAmount > AUDIO_SEND_CAP_BYTES) {
+                noteDrop("audio")
+                return
+            }
+            ws.send(buf)
+            clearDropNoticeIfQuiet()
+            return
+        }
+        backlog.chunks.push(buf)
+        backlog.bytes += buf.byteLength
+        while (backlog.bytes > AUDIO_BACKLOG_CAP_BYTES && backlog.chunks.length) {
+            backlog.bytes -= backlog.chunks.shift().byteLength
+            noteDrop("audio")
+        }
+        if (live) drainAudioBacklog()
+    }
+
+    // Ships the backlog in order, pacing against the send cap.
+    const drainAudioBacklog = () => {
+        const backlog = audioBacklog.current
+        clearTimeout(backlog.drainTimer)
+        backlog.drainTimer = null
+        const ws = audiows.current
+        while (backlog.chunks.length) {
+            if (!ws || ws.readyState !== WebSocket.OPEN || !streamingRef.current) return
+            if (ws.bufferedAmount > AUDIO_SEND_CAP_BYTES) {
+                backlog.drainTimer = setTimeout(drainAudioBacklog, 250)
+                return
+            }
+            const chunk = backlog.chunks.shift()
+            backlog.bytes -= chunk.byteLength
+            ws.send(chunk)
+        }
+    }
+
+    // Video chunks: sent unless the socket is backed up past the cap. On a
+    // starved uplink the queue would otherwise grow without bound and die
+    // with the page; drop and count instead (the notice says so).
+    const sendVideoChunk = (blob) => {
+        const ws = videows.current
+        if (!ws || ws.readyState !== WebSocket.OPEN) return
+        if (ws.bufferedAmount > VIDEO_SEND_CAP_BYTES) {
+            noteDrop("video")
+            return
+        }
+        ws.send(blob)
+        clearDropNoticeIfQuiet()
     }
 
     // Unmount teardown. Browser back (or any route change) unmounts this
@@ -1084,6 +1332,8 @@ function JoinPage() {
         }
         ending.current = false
         replayDone.current = false
+        everOpened.current = false
+        cancelReconnect()
         setCurrentForm("Connecting")
         setMimeExtension(pm.mediaExt)
         setMimeType(pm.mediaType)
@@ -1318,9 +1568,30 @@ function JoinPage() {
         setArmed(true)
     }
 
+    // Whether the media kept across a reconnect is still usable: a dead
+    // track (iOS ends the mic on some audio-route changes) or a closed
+    // AudioContext means a real re-acquire instead.
+    const mediaReusable = () => {
+        const s = rawStreamReference.current || streamReference.current
+        const ctx = audioContext.current
+        if (!s || !ctx || ctx.state === "closed") return false
+        const tracks = s.getTracks()
+        return tracks.length > 0 && tracks.every((t) => t.readyState === "live")
+    }
+
     const handleStreamRef = useRef(null);
     const handleStream = async () => {
         try {
+            // Reconnects reuse the microphone/camera and AudioContext from
+            // the first connection (disconnect kept them): no new
+            // permission prompt, no restarted capture.
+            const reuse = mediaReusable()
+            if (!reuse && (streamReference.current !== null || audioContext.current !== null)) {
+                // Kept media that died: release it before re-acquiring. The
+                // queued audio is no longer contiguous with what follows.
+                disconnect(false)
+                audioBacklog.current = { chunks: [], bytes: 0, drainTimer: null }
+            }
             //Await wake lock for screen first
             await acquireWakeLock()
             //handle older browsers that might implement getUserMedia in some way
@@ -1328,12 +1599,13 @@ function JoinPage() {
             ensureGetUserMedia()
 
             if (navigator.mediaDevices != null) {
-                let stream = await navigator.mediaDevices.getUserMedia(constraintObj)
-                rawStreamReference.current = stream
+                let stream = reuse ? streamReference.current : await navigator.mediaDevices.getUserMedia(constraintObj)
+                if (!reuse) rawStreamReference.current = stream
 
                 if (
-                    joinwith.current === "Video" ||
-                    joinwith.current === "Videocartoonify"
+                    !reuse &&
+                    (joinwith.current === "Video" ||
+                    joinwith.current === "Videocartoonify")
                 ) {
                     // Apply the orientation choice from the device-check
                     // preview; "auto" falls back to the gravity heuristic
@@ -1358,15 +1630,17 @@ function JoinPage() {
 
                 // media.then(function (stream) {
                 streamReference.current = stream
-                //keep this here for now to enable to capturing of audio finger printing
-                const context = new AudioContext({ sampleRate: 16000 })
-                // iOS creates contexts suspended when constructed this far
-                // after the tap gesture; resume so audio actually flows.
-                if (context.state === "suspended") {
-                    context.resume().catch(() => {})
+                if (!reuse) {
+                    //keep this here for now to enable to capturing of audio finger printing
+                    const context = new AudioContext({ sampleRate: 16000 })
+                    // iOS creates contexts suspended when constructed this far
+                    // after the tap gesture; resume so audio actually flows.
+                    if (context.state === "suspended") {
+                        context.resume().catch(() => {})
+                    }
+                    source.current = context.createMediaStreamSource(stream)
+                    audioContext.current = context
                 }
-                source.current = context.createMediaStreamSource(stream)
-                audioContext.current = context
                 if (joinwith.current === "Audio") {
                     audiows.current = new WebSocket(apiService.getAudioWebsocketEndpoint(),)
                     connect_audio_processor_service();
@@ -1389,26 +1663,29 @@ function JoinPage() {
                         // must fit inside (2026-08-08: an 8 Mbps cap plus a
                         // server-side ingest stall queued minutes of video
                         // on the phones, lost at teardown).
-                        const vSettings = (() => {
-                            const t = stream.getVideoTracks()[0]
-                            return t && t.getSettings ? t.getSettings() : {}
-                        })()
-                        const capturedPixels =
-                            (vSettings.width || 640) * (vSettings.height || 480)
-                        const videoRate = Math.min(
-                            5_000_000,
-                            Math.max(
-                                1_250_000,
-                                Math.round(
-                                    (2_500_000 * capturedPixels) / (1280 * 720),
+                        if (!reuse || !recorderOptions.current) {
+                            const vSettings = (() => {
+                                const t = stream.getVideoTracks()[0]
+                                return t && t.getSettings ? t.getSettings() : {}
+                            })()
+                            const capturedPixels =
+                                (vSettings.width || 640) * (vSettings.height || 480)
+                            const videoRate = Math.min(
+                                5_000_000,
+                                Math.max(
+                                    1_250_000,
+                                    Math.round(
+                                        (2_500_000 * capturedPixels) / (1280 * 720),
+                                    ),
                                 ),
-                            ),
-                        )
-                        recorderOptions.current = {
-                            mimeType: mimetype,
-                            videoBitsPerSecond: videoRate,
-                            audioBitsPerSecond: 128_000,
+                            )
+                            recorderOptions.current = {
+                                mimeType: mimetype,
+                                videoBitsPerSecond: videoRate,
+                                audioBitsPerSecond: 128_000,
+                            }
                         }
+                        // A fresh recorder per connection (see disconnect).
                         const mediaRec = new MediaRecorder(
                             stream,
                             recorderOptions.current,
@@ -1625,8 +1902,17 @@ function JoinPage() {
         const mediaExt = (mediaType !== "" && mediaType.indexOf("webm") !== -1) ? "webm" : (mediaType !== "" && mediaType.indexOf("mp4") !== -1) ? "mp4" : ""
         sessionService.joinByodSession(names, passcode, collaborators).then(
             (response) => {
+                const joinFailed = (message) => {
+                    setDisplayText(message)
+                    setCurrentForm("JoinError")
+                    disconnect(true)
+                }
                 if (response.status === 200) {
-                    response.json().then((jsonObj) => {
+                    response.json().catch(() => {
+                        joinFailed("The server sent an unexpected reply. Please try again.")
+                        return null
+                    }).then((jsonObj) => {
+                        if (jsonObj === null) return
                         setSession(SessionModel.fromJson(jsonObj["session"]))
                         setSessionDevice(
                             SessionDeviceModel.fromJson(
@@ -1659,12 +1945,26 @@ function JoinPage() {
                         joinwith.current = l_joinwith
                         setCurrentForm("")
                     })
-                } else if (response.status === 400 || response.status === 401) {
-                    response.json().then((jsonObj) => {
-                        setDisplayText(jsonObj["message"])
-                        setCurrentForm("JoinError")
-                        disconnect(true)
-                    })
+                } else {
+                    // Any non-200 must end the spinner (it used to hang on
+                    // a 5xx until the 30 s watchdog). Proxy and limiter
+                    // errors are not JSON, so the message is best-effort.
+                    let message =
+                        "Couldn't join the session (server returned " +
+                        response.status +
+                        "). Please try again in a moment."
+                    if (response.status === 429) {
+                        message = "Too many join attempts from this network. Wait a minute and try again."
+                    }
+                    response
+                        .json()
+                        .then(
+                            (jsonObj) => {
+                                if (jsonObj && jsonObj["message"]) message = jsonObj["message"]
+                            },
+                            () => {},
+                        )
+                        .finally(() => joinFailed(message))
                 }
             },
             (apierror) => {
@@ -1716,16 +2016,12 @@ function JoinPage() {
     const connect_audio_processor_service = () => {
         audiows.current.binaryType = "arraybuffer"
 
-        // Local to THIS socket: React state in the onclose closure is a
-        // stale snapshot from connect time (always false), which made every
-        // mid-session drop take the "couldn't reach the server" dead end
-        // instead of reconnecting.
-        let opened = false
-
         audiows.current.onopen = (e) => {
-            opened = true
+            // A ref (not a per-socket local): React state in the onclose
+            // closure is a stale snapshot, and a socket-local flag made a
+            // failed RETRY take the "couldn't reach the server" dead end.
+            everOpened.current = true
             next("audio_socket_open")
-            reconnectCounter.current = 0
             setPageTitle(name.current)
 
         };
@@ -1742,6 +2038,15 @@ function JoinPage() {
             } else if (message['type'] === 'registeredfingerprintfailed') {
                 console.error("saved fingerprint failed (audio): " + message["message"])
                 onSavedFingerprintFailed(message["message"])
+            } else if (message["type"] === "asr_status") {
+                // Server-side transcription health. Degraded = the live
+                // transcript will lag; the recording itself is unaffected.
+                setAsrNotice(
+                    message["state"] === "degraded"
+                        ? message["message"] ||
+                              "Live transcription is running behind on the server; the recording is unaffected."
+                        : null,
+                )
             } else if (message["type"] === "error") {
                 disconnect(true)
                 setDisplayText(
@@ -1761,33 +2066,17 @@ function JoinPage() {
         }
 
         audiows.current.onclose = (e) => {
-            if (!ending.current) {
-                // Retry a few times, then surface a real error. `opened` is
-                // socket-local truth about whether this connection ever came
-                // up (state.* here would be a stale snapshot).
-                if (reconnectCounter.current < 5 && opened) {
-                    setCurrentForm("Connecting")
-                    disconnect()
-                    // The new server connection starts with no speaker
-                    // fingerprints — but they are all queued client-side
-                    // now, so the reconnect replays them automatically
-                    // (no bouncing the group back to the speaker page).
-                    dispatch({ type: "SPEAKERS_VALIDATED", payload: false })
-                    replayDone.current = false
-                    reconnectCounter.current = reconnectCounter.current + 1
-                    setTimeout(handleStream, 2000)
-                } else if (!opened) {
-                    setDisplayText(
-                        "Couldn't reach the session server. Please try again, or ask your instructor to check that recording is running.",
-                    )
-                    setCurrentForm("ClosedSession")
-                    disconnect(true)
-                } else {
-                    setDisplayText("Connection to the session has been lost.")
-                    setCurrentForm("ClosedSession")
-                    disconnect(true)
-                }
+            if (ending.current) return
+            if (!everOpened.current) {
+                // Never came up at all this join — not a mid-session drop.
+                setDisplayText(
+                    "Couldn't reach the session server. Please try again, or ask your instructor to check that recording is running.",
+                )
+                setCurrentForm("ClosedSession")
+                disconnect(true)
+                return
             }
+            scheduleReconnect("audio")
         }
     }
 
@@ -1843,7 +2132,10 @@ function JoinPage() {
             }
         };
 
-        videows.current.onclose = e => {
+        // Used to be empty: a video drop was silent and lost the video for
+        // the rest of the session (audit E.2).
+        videows.current.onclose = (e) => {
+            if (!ending.current) scheduleReconnect("video")
         };
     }
 
@@ -1856,7 +2148,9 @@ function JoinPage() {
         message = {
             type: "start",
             key: key.current,
-            start_time: 0.0,
+            // 0 on a first connection; on a reconnect the seconds of audio
+            // queued while offline (see audioBacklogSeconds).
+            start_time: audioBacklogSeconds(),
             sample_rate: audioContext.current.sampleRate,
             encoding: "pcm_f32le",
             channels: 1,
@@ -1994,53 +2288,87 @@ function JoinPage() {
         }
     }
 
-    const fetchTranscript = async (deviceid) => {
+    // Both fetchers: `full` re-fetches everything (replace), otherwise only
+    // rows after the last-seen id (merge by id). Resolve false on any
+    // failure so the poll loop backs off.
+    const fetchTranscript = async (deviceid, signal = undefined, full = true) => {
         try {
             const response =
-                await sessionService.getSessionDeviceTranscriptSpeakerMetricsForClient(deviceid, 0, key.current)
+                await sessionService.getSessionDeviceTranscriptSpeakerMetricsForClient(
+                    deviceid,
+                    0,
+                    key.current,
+                    { signal, afterId: full ? 0 : lastTranscriptId.current },
+                )
 
-            if (response.status === 200) {
-                const jsonObj = await response.json()
-                const fetched_trancript_metrics = jsonObj.map((item, index) => {return { ...item['transcript'], speaker_metrics: item['speaker_metrics'] }});
-
-                transcripts.current = fetched_trancript_metrics
-                
-                const sessionLen =
-                    Object.keys(session).length > 0 ? session.length : 0
-                setStartTime(Math.round(sessionLen * timeRange.current[0] * 100) / 100)
-                setEndTime(Math.round(sessionLen * timeRange.current[1] * 100) / 100)
-            } else if (response.status === 400 || response.status === 401) {
+            if (response.status !== 200) {
                 console.error(response, "no transcript obj")
+                return false
             }
+            const jsonObj = await response.json()
+            const fetched_trancript_metrics = jsonObj.map((item, index) => {return { ...item['transcript'], speaker_metrics: item['speaker_metrics'] }});
+
+            transcripts.current = full
+                ? fetched_trancript_metrics
+                : mergeById(transcripts.current, fetched_trancript_metrics)
+            lastTranscriptId.current = maxId(
+                fetched_trancript_metrics,
+                full ? 0 : lastTranscriptId.current,
+            )
+
+            const sessionLen =
+                Object.keys(session).length > 0 ? session.length : 0
+            const sTime = Math.round(sessionLen * timeRange.current[0] * 100) / 100
+            const eTime = Math.round(sessionLen * timeRange.current[1] * 100) / 100
+            setStartTime(sTime)
+            setEndTime(eTime)
+            // The display effect keys on start/end time, which rarely
+            // change between polls: refresh the rows directly when new
+            // ones arrived.
+            if (full || fetched_trancript_metrics.length) generateDisplayTranscripts(sTime, eTime)
+            return true
         } catch (error) {
             console.error(
                 "byod-join-component error func : fetch transcript",
                 error,
             )
+            return false
         }
     }
 
-    const fetchVideoMetric = async (deviceid) => {
+    const fetchVideoMetric = async (deviceid, signal = undefined, full = true) => {
         try {
             const response =
                 await sessionService.getSessionDeviceVideoMetricsForClient(
                     deviceid,
                     0,
                     key.current,
+                    { signal, afterId: full ? 0 : lastVideoMetricId.current },
                 )
 
-            if (response.status === 200) {
-                const jsonObj = await response.json()
-
-                videoMetrics.current = jsonObj //fetched_video_metrics
-            } else if (response.status === 400 || response.status === 401) {
+            if (response.status !== 200) {
                 console.error(response, "no videometrics obj")
+                return false
             }
+            const jsonObj = await response.json()
+
+            videoMetrics.current = full ? jsonObj : mergeById(videoMetrics.current, jsonObj)
+            lastVideoMetricId.current = maxId(jsonObj, full ? 0 : lastVideoMetricId.current)
+            if (full || jsonObj.length) {
+                const sessionLen =
+                    Object.keys(session).length > 0 ? session.length : 0
+                generateDisplayVideoMetrics(
+                    Math.round(sessionLen * timeRange.current[0] * 100) / 100,
+                    Math.round(sessionLen * timeRange.current[1] * 100) / 100,
+                )
+            }
+            return true
         } catch (error) {
             console.error(
                 "byod-join-component error func : fetch video metrics",
                 error,
             )
+            return false
         }
     }
 
@@ -2240,6 +2568,9 @@ function JoinPage() {
             return 
         }
 
+        // Reconnects keep the lock from the first connection.
+        if (wakeLock.current !== null && !wakeLock.current.released) return
+
         try {
             wakeLock.current = await navigator.wakeLock.request("screen")
             if (wakeLockVisListener.current === null) {
@@ -2413,6 +2744,28 @@ function JoinPage() {
                 }}
             >
                 {streamWarning}
+            </div>
+        )}
+        {(netNotice || asrNotice) && (
+            <div
+                role="status"
+                style={{
+                    position: "fixed",
+                    bottom: 12,
+                    left: "50%",
+                    transform: "translateX(-50%)",
+                    maxWidth: "92vw",
+                    zIndex: 9998,
+                    background: "rgba(120, 53, 15, 0.94)",
+                    color: "#fff",
+                    padding: "6px 14px",
+                    borderRadius: 999,
+                    fontSize: "13px",
+                    textAlign: "center",
+                    pointerEvents: "none",
+                }}
+            >
+                {netNotice || asrNotice}
             </div>
         )}
         {rotatePrompt && (

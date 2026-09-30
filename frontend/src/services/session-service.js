@@ -6,6 +6,30 @@ class SessionService {
   keywordListId = "";
   api = new ApiService();
 
+  // GET for the chained polls: takes an AbortSignal so an unmounted view
+  // can cancel its in-flight request. The shared fetch wrapper has no
+  // signal option yet, so with a signal this mirrors its options directly.
+  _get(path, headers = {}, opts = {}) {
+    if (!opts.signal) {
+      return this.api.httpRequestCallWithHeader(path, "GET", {}, headers);
+    }
+    return fetch(this.api.getEndpoint() + path, {
+      method: "GET",
+      mode: "cors",
+      credentials: "include",
+      cache: "no-store",
+      headers: this.api._generateHeaders(headers, undefined),
+      redirect: "follow",
+      signal: opts.signal,
+    });
+  }
+
+  // `after_id` narrows a poll to rows newer than the last one seen; 0 (or
+  // absent) keeps the full-history response.
+  _afterId(path, afterId) {
+    return afterId > 0 ? `${path}?after_id=${afterId}` : path;
+  }
+
   endSession(sessionId) {
     return this.api.httpRequestCall(
       `api/v1/sessions/${sessionId}/stop`,
@@ -14,8 +38,8 @@ class SessionService {
     );
   }
 
-  getSessions() {
-    return this.api.httpRequestCall("api/v1/sessions", "GET", {});
+  getSessions(opts = {}) {
+    return this._get("api/v1/sessions", {}, opts);
   }
 
   getSession(sessionId) {
@@ -119,12 +143,12 @@ class SessionService {
   getGlobalPosthocQueue() {
     return this.api.httpRequestCall(`api/v1/posthoc_queue`, "GET", {});
   }
-  getPosthocQueue(sessionId) {
-    return this.api.httpRequestCall(
-      `api/v1/sessions/${sessionId}/posthoc_queue`,
-      "GET",
-      {},
-    );
+  getPosthocQueue(sessionId, opts = {}) {
+    return this._get(`api/v1/sessions/${sessionId}/posthoc_queue`, {}, opts);
+  }
+  // Live per-pod alert flags (silent / dominated / hanging question).
+  getSessionTriage(sessionId, opts = {}) {
+    return this._get(`api/v1/sessions/${sessionId}/triage`, {}, opts);
   }
   enqueuePosthoc(sessionId, deviceIds) {
     return this.api.httpRequestCall(
@@ -133,12 +157,8 @@ class SessionService {
       { device_ids: deviceIds },
     );
   }
-  getSessionDevices(sessionId) {
-    return this.api.httpRequestCall(
-      `api/v1/sessions/${sessionId}/devices`,
-      "GET",
-      {}
-    );
+  getSessionDevices(sessionId, opts = {}) {
+    return this._get(`api/v1/sessions/${sessionId}/devices`, {}, opts);
   }
 
   getSessionDeviceTranscripts(sessionId, sessionDeviceId, startTime = 0) {
@@ -172,20 +192,21 @@ class SessionService {
     return processingKey ? { "X-Processing-Key": processingKey } : {};
   }
 
-  getSessionDeviceTranscriptSpeakerMetricsForClient(sessionDeviceId, startTime = 0, processingKey = null) {
-    return this.api.httpRequestCallWithHeader(
-      `api/v1/devices/${sessionDeviceId}/transcriptspeakermetrics/client`,
-      "GET",
-      {},
-      this._clientKeyHeader(processingKey)
+  // The three live polls below take { afterId, signal }: afterId asks only
+  // for rows newer than that id (the caller merges by id), signal aborts.
+  getSessionDeviceTranscriptSpeakerMetricsForClient(sessionDeviceId, startTime = 0, processingKey = null, opts = {}) {
+    return this._get(
+      this._afterId(`api/v1/devices/${sessionDeviceId}/transcriptspeakermetrics/client`, opts.afterId),
+      this._clientKeyHeader(processingKey),
+      opts
     );
   }
 
-  getSessionDeviceTranscriptsForClient(sessionDeviceId, startTime = 0) {
-    return this.api.httpRequestCall(
-      `api/v1/devices/${sessionDeviceId}/transcripts/client`,
-      "GET",
-      {}
+  getSessionDeviceTranscriptsForClient(sessionDeviceId, startTime = 0, opts = {}) {
+    return this._get(
+      this._afterId(`api/v1/devices/${sessionDeviceId}/transcripts/client`, opts.afterId),
+      {},
+      opts
     );
   }
 
@@ -207,29 +228,22 @@ class SessionService {
     );
   }
 
-  getSessionDeviceVideoMetricsForClient(sessionDeviceId, startTime = 0, processingKey = null) {
-    return this.api.httpRequestCallWithHeader(
-      `api/v1/devices/${sessionDeviceId}/videometrics/client`,
-      "GET",
-      {},
-      this._clientKeyHeader(processingKey)
+  getSessionDeviceVideoMetricsForClient(sessionDeviceId, startTime = 0, processingKey = null, opts = {}) {
+    return this._get(
+      this._afterId(`api/v1/devices/${sessionDeviceId}/videometrics/client`, opts.afterId),
+      this._clientKeyHeader(processingKey),
+      opts
     );
   }
 
-  getSessionTranscriptsForClient(sessionId, alias,startTime = 0) {
-    return this.api.httpRequestCall(
-      `api/v1/session/${sessionId}/transcripts/student/${alias}`,
-      "GET",
-      {}
-    );
+  // Student-dashboard polls: abortable, but these routes have no after_id
+  // (the caller replaces the list).
+  getSessionTranscriptsForClient(sessionId, alias, startTime = 0, opts = {}) {
+    return this._get(`api/v1/session/${sessionId}/transcripts/student/${alias}`, {}, opts);
   }
 
-  getSessionVideoMetricsForClient(sessionId, alias,startTime = 0) {
-    return this.api.httpRequestCall(
-      `api/v1/session/${sessionId}/videometrics/student/${alias}`,
-      "GET",
-      {}
-    );
+  getSessionVideoMetricsForClient(sessionId, alias, startTime = 0, opts = {}) {
+    return this._get(`api/v1/session/${sessionId}/videometrics/student/${alias}`, {}, opts);
   }
 
   getSessionDeviceTranscriptsByAlias(sessionId, deviceId, alias,startTime = 0) {

@@ -6,6 +6,7 @@ import { SessionDeviceModel } from "../models/session-device"
 import { TranscriptModel } from "../models/transcript"
 import { SpeakerMetricsModel } from "../models/speaker-metrics"
 import { SpeakerVideoMetricsModel } from "../models/speaker-video-metrics"
+import { maxId } from "../globals"
 
 export class ActiveSessionService {
     socketService = new SocketService()
@@ -19,6 +20,10 @@ export class ActiveSessionService {
     socket
     sessionId
     initialized = false
+    // Bumped by every initialize()/close(): an initialize() still awaiting
+    // its REST calls when close() runs must not open a socket afterwards
+    // (that socket had no owner and lived until the page was reloaded).
+    generation = 0
 
     // onResult is called EXACTLY once with an outcome:
     //   { status: "ready" }                        — session + devices loaded
@@ -33,21 +38,29 @@ export class ActiveSessionService {
         }
         this.close()
         this.sessionId = sessionId
+        const generation = ++this.generation
+        // close() (unmount) or a newer initialize() ran while we awaited:
+        // the caller is gone, so report nothing and open nothing.
+        const cancelled = () => generation !== this.generation
         try {
             const sessionResp = await this.sessionService.getSession(sessionId)
+            if (cancelled()) return
             if (sessionResp.status !== 200) {
                 onResult({ status: "error", httpStatus: sessionResp.status })
                 return
             }
             const session = await sessionResp.json()
+            if (cancelled()) return
             this.sessionSource.next(SessionModel.fromJson(session))
 
             const devicesResp = await this.sessionService.getSessionDevices(sessionId)
+            if (cancelled()) return
             if (devicesResp.status !== 200) {
                 onResult({ status: "error", httpStatus: devicesResp.status })
                 return
             }
             const devices = await devicesResp.json()
+            if (cancelled()) return
             this.sessionDeviceSource.next(SessionDeviceModel.fromJsonList(devices))
 
             // The pod list comes from REST above, so the page is ready to show
@@ -60,14 +73,30 @@ export class ActiveSessionService {
             this.initializeSocket()
             onResult({ status: "ready" })
         } catch (error) {
+            if (cancelled()) return
             console.error("active-session-service: initialize failed", error)
             onResult({ status: "error", httpStatus: null, error })
         }
     }
 
+    // Highest ids currently held, sent with every join_room so a reconnect
+    // replays only newer rows. Both 0 on the first join = full history.
+    lastSeenIds() {
+        const fields = {}
+        const t = maxId(this.transcriptSource.getValue())
+        const v = maxId(this.videoMetricSource.getValue())
+        if (t > 0) fields.last_transcript_id = t
+        if (v > 0) fields.last_video_metric_id = v
+        return fields
+    }
+
     initializeSocket() {
         // Create Socket.
-        this.socket = this.socketService.createSocket("session", this.sessionId)
+        this.socket = this.socketService.createSocket(
+            "session",
+            this.sessionId,
+            () => this.lastSeenIds(),
+        )
         // Update device.
         this.socket.on("device_update", (e) => {
             const updatedDevice = SessionDeviceModel.fromJson(JSON.parse(e))
@@ -108,13 +137,14 @@ export class ActiveSessionService {
         })
 
         // Handle room join. socket.io fires 'connect' (and therefore
-        // join_room) again after every reconnect, and the server answers
-        // each join with a full digest replay — start from a clean slate so
-        // a reconnect doesn't append a second copy of every transcript.
+        // join_room) again after every reconnect. The join carries the
+        // last-seen ids, so the replay that follows is only the rows we
+        // missed — local state is KEPT (clearing it here would blank the
+        // page until the partial replay landed). Both digest handlers
+        // de-duplicate by id, so a server that still replays the full
+        // history is harmless too.
         this.socket.on("room_joined", (e) => {
             this.initialized = true
-            this.transcriptSource.next([])
-            this.videoMetricSource.next([])
         })
 
         // Update transcripts and speaker metrics. Replace-by-id when the row
@@ -183,15 +213,20 @@ export class ActiveSessionService {
             this.transcriptSource.next(transcripts)
         })
 
-        // Initial digest of speaker video metrics.
+        // Initial digest of speaker video metrics. Skip ids already present
+        // (same reason as the transcript digest).
         this.socket.on("video_metrics_digest", (e) => {
             const data = JSON.parse(e)
             const videoMetrics = this.videoMetricSource.getValue()
+            const known = new Set(videoMetrics.map((m) => m.id))
             for (const metrics of data) {
                 const speaker_video_metrics = SpeakerVideoMetricsModel.fromJson(
                     metrics["speaker_video_metrics"]
                 )
-                videoMetrics.push(speaker_video_metrics)
+                if (speaker_video_metrics.id == null || !known.has(speaker_video_metrics.id)) {
+                    known.add(speaker_video_metrics.id)
+                    videoMetrics.push(speaker_video_metrics)
+                }
             }
             this.videoMetricSource.next(videoMetrics)
         })
@@ -210,8 +245,12 @@ export class ActiveSessionService {
     }
 
     close() {
+        // Invalidate any initialize() still in flight (see `generation`).
+        this.generation++
         if (this.socket != null) {
+            this.socket.removeAllListeners()
             this.socket.disconnect()
+            this.socket = null
         }
         this.initialized = false
         this.sessionId = null

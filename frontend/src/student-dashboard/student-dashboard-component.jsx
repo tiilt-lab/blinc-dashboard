@@ -8,6 +8,12 @@ import { StudentModel } from "../models/student"
 import { SessionModel } from "../models/session";
 import { SessionDeviceModel } from "../models/session-device";
 import { FEATURE_LABELS, BOX_LABELS, buildChecklist } from "../utilities/checklist"
+import { startPolling } from "../globals"
+
+// Live-session poll cadence. This is a student's read-only view of their
+// own lines (full history per response — the alias routes have no
+// after_id), so 5 s is plenty and halves the load of the old 2 s.
+const LIVE_POLL_MS = 5000
 
 const surveyquestion = [
   ["Communication rate", "How would you rate the level of communication?"],
@@ -151,7 +157,7 @@ function StudentSessionDashboard() {
   //  FIRST USEEFFECT:  CALL ONCE STEP 1,2, 2.1, 2.1.1, OR 2.2 HAS COMPLETED            
   // --------------------------------------------------------
   useEffect(() => {
-    let intervalLoad
+    let stopPoll = null
 
     if (session.current !== null && userDetail !== null && sessiontype !== "") {
 
@@ -182,21 +188,23 @@ function StudentSessionDashboard() {
           setNextPage("displaygrouppage")
         }
       } else if (sessiontype === "currentsession" && !firstLoadCompleted) { //LOOK INTO THIS LOGIC, AND ENSURE SMOOTH OPERATION WITH LOADEDAFRESH
-        // fetch the transcript
-        fetchTranscript(session.current.id, setTranscripts)
-        fetchVideoMetric(session.current.id, setVideoMetrics)
         setCurrentSessionRunning(true);
-        //only load for current session every 2 seconds
-        intervalLoad = setInterval(() => {
-          fetchTranscript(session.current.id, setTranscripts)
-          fetchVideoMetric(session.current.id, setVideoMetrics)
-        }, 2000)
+        // Live session: chained poll (never overlapping, paused while the
+        // tab is hidden, backed off on errors, aborted on cleanup). The
+        // first run fires immediately.
+        stopPoll = startPolling(async (signal) => {
+          const [a, b] = await Promise.all([
+            fetchTranscript(session.current.id, setTranscripts, null, signal),
+            fetchVideoMetric(session.current.id, setVideoMetrics, null, signal),
+          ])
+          return a !== false && b !== false
+        }, LIVE_POLL_MS)
       }
 
     }
 
     return () => {
-      clearInterval(intervalLoad)
+      if (stopPoll) stopPoll()
     }
   }, [session.current, userDetail, sessionDevices, sessiontype])
 
@@ -451,11 +459,12 @@ function StudentSessionDashboard() {
   }
 
 
-  const fetchTranscript = async (sessionId, setMetric, deviceId = null) => {
+  // Both fetchers resolve false on any failure so the live poll can back off.
+  const fetchTranscript = async (sessionId, setMetric, deviceId = null, signal = undefined) => {
     try {
       let response = null
       if (deviceId === null) {
-        response = await sessionService.getSessionTranscriptsForClient(sessionId, userDetail.username)
+        response = await sessionService.getSessionTranscriptsForClient(sessionId, userDetail.username, 0, { signal })
       } else {
         response = await sessionService.getSessionDeviceTranscriptsByAlias(sessionId, deviceId, userDetail.username)
       }
@@ -475,22 +484,24 @@ function StudentSessionDashboard() {
         setMetric(fetched_trancript_metrics)
         setLoadedAfresh(true)
         setTranscriptDoneLoading(true);
-      } else if (response !== null && (response.status === 400 || response.status === 401)) {
-        console.error(response, "no transcript obj")
+        return true
       }
+      console.error(response, "no transcript obj")
+      return false
     } catch (error) {
       console.error(
-        "byod-join-component error func : fetch transcript",
+        "student-dashboard error func : fetch transcript",
         error,
       )
+      return false
     }
   }
 
-  const fetchVideoMetric = async (sessionId, setMetric, deviceId = null) => {
+  const fetchVideoMetric = async (sessionId, setMetric, deviceId = null, signal = undefined) => {
     try {
       let response = null
       if (deviceId === null) {
-        response = await sessionService.getSessionVideoMetricsForClient(sessionId, userDetail.username)
+        response = await sessionService.getSessionVideoMetricsForClient(sessionId, userDetail.username, 0, { signal })
       } else {
         response = await sessionService.getSessionDeviceVideoMetricsByAlias(sessionId, deviceId, userDetail.username)
       }
@@ -502,14 +513,16 @@ function StudentSessionDashboard() {
         setMetric(fetched_video_metrics)
         setLoadedAfresh(true)
         setVideoMetricDoneLoading(true);
-      } else if (response.status === 400 || response.status === 401) {
-        console.error(response, "no videometrics obj")
+        return true
       }
+      console.error(response, "no videometrics obj")
+      return false
     } catch (error) {
       console.error(
-        "byod-join-component error func : fetch video metrics",
+        "student-dashboard error func : fetch video metrics",
         error,
       )
+      return false
     }
   }
 

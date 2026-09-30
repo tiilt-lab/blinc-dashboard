@@ -217,24 +217,34 @@ class AuthService {
   }
 
   me(stateSetter) {
-    const fetchRes = new ApiService().httpRequestCall("api/v1/me", 'GET', {});
-    fetchRes.then(
-      (response) => {
-        if (response.status === 200) {
-          response.json().then(
-            userobj => {
-              const user = UserModel.fromJson(userobj);
-              stateSetter(user);
-            }
-          )
-        }else{
-          stateSetter("cors error");
+    this.meStatus().then((r) => stateSetter(r.status === "ok" ? r.user : "cors error"));
+  }
+
+  // /me with the failure kind kept apart, for the route guard:
+  //   { status: "ok", user }
+  //   { status: "denied", httpStatus }      401/403 — the login is gone
+  //   { status: "unavailable", httpStatus } 5xx, network error, bad body —
+  //                                          the API is unreachable, NOT the
+  //                                          user logged out (a 502 during a
+  //                                          deploy used to bounce teachers
+  //                                          to /login mid-class).
+  async meStatus() {
+    try {
+      const response = await new ApiService().httpRequestCall("api/v1/me", 'GET', {});
+      if (response.status === 200) {
+        try {
+          return { status: "ok", user: UserModel.fromJson(await response.json()) };
+        } catch {
+          return { status: "unavailable", httpStatus: 200 };
         }
-      },
-      (apiError) => {
-        apiError.status = 600
-        stateSetter("cors error");
-      })
+      }
+      if (response.status === 401 || response.status === 403) {
+        return { status: "denied", httpStatus: response.status };
+      }
+      return { status: "unavailable", httpStatus: response.status };
+    } catch {
+      return { status: "unavailable", httpStatus: null };
+    }
   }
 
   changeEmail(currentPassword, newEmail) {

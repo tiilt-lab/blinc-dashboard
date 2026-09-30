@@ -4,6 +4,9 @@ import { SessionService } from "../services/session-service"
 import { SessionModel } from "../models/session"
 import { FolderModel } from "../models/folder"
 import { DiscussionSessionPage } from "./html-pages"
+import { startPolling } from "../globals"
+
+const LIST_POLL_MS = 15000
 
 function SessionsComponent(props) {
     //forms = Forms;
@@ -31,69 +34,58 @@ function SessionsComponent(props) {
     const [searchParam, setSearchParam] = useSearchParams()
 
     // Poll the sessions list so live badges (Analyzing…) update without a
-    // manual refresh.
+    // manual refresh. Chained (never overlapping), paused while the tab is
+    // hidden, backed off on errors, aborted on unmount; the initial load
+    // below does the first fetch, so this one waits a full interval.
     useEffect(() => {
-        const t = setInterval(() => {
-            new SessionService().getSessions().then(
-                async (response) => {
-                    if (response.status === 200)
-                        response.json().then((data) =>
-                            setSessions(SessionModel.fromJsonList(data)),
-                        )
-                },
-                () => {},
-            )
-        }, 15000)
-        return () => clearInterval(t)
+        return startPolling(
+            async (signal) => {
+                const response = await new SessionService().getSessions({ signal })
+                if (response.status !== 200) return false
+                setSessions(SessionModel.fromJsonList(await response.json()))
+                return true
+            },
+            LIST_POLL_MS,
+            { immediate: false },
+        )
     }, [])
 
+    // Initial load. Any non-200, non-JSON body or network error clears the
+    // spinner and says so — it used to spin forever on a 5xx.
     useEffect(() => {
-        const fetchData = new SessionService().getSessions()
-        fetchData.then(
-            async (response) => {
-                if (response.status === 200) {
-                    const resp = response.json()
-                    resp.then(
-                        (session) => {
-                            const sessresult =
-                                SessionModel.fromJsonList(session)
-                            setSessions(sessresult)
-                            const fetchData2 = new SessionService().getFolders()
-                            fetchData2.then(
-                                async (response) => {
-                                    if (response.status === 200) {
-                                        const resp2 = response.json()
-                                        resp2.then((folders) => {
-                                            const folderresult =
-                                                FolderModel.fromJsonList(
-                                                    folders,
-                                                )
-                                            setFolders(folderresult)
-                                            setIsLoading(false)
-                                        })
-                                    }
-                                },
-                                (apierror2) => {
-                                    console.error(
-                                        "sessions-components func: useEffect 4 ",
-                                        apierror2,
-                                    )
-                                },
-                            )
-                        },
-                        (error) => {
-                            console.error(
-                                "sessions-components func: useEffect 1 ",
-                                error,
-                            )
-                        },
-                    )
-                }
-            },
-            (apierror) => {
-                console.error("sessions-components func: useEffect 2 ", apierror)
-            },
-        )
+        let cancelled = false
+        const fail = (why) => {
+            if (cancelled) return
+            console.error("sessions-components: load failed", why)
+            setIsLoading(false)
+            setShowAlert(true)
+            setAlertMessage(
+                "Couldn't load your sessions" +
+                    (typeof why === "number" ? " (server returned " + why + ")" : "") +
+                    ". Check your connection and refresh to try again.",
+            )
+        }
+        const load = async () => {
+            try {
+                const svc = new SessionService()
+                const response = await svc.getSessions()
+                if (response.status !== 200) return fail(response.status)
+                const sessresult = SessionModel.fromJsonList(await response.json())
+                const response2 = await svc.getFolders()
+                if (response2.status !== 200) return fail(response2.status)
+                const folderresult = FolderModel.fromJsonList(await response2.json())
+                if (cancelled) return
+                setSessions(sessresult)
+                setFolders(folderresult)
+                setIsLoading(false)
+            } catch (error) {
+                fail(error)
+            }
+        }
+        load()
+        return () => {
+            cancelled = true
+        }
     }, [currentForm])
 
     useEffect(() => {

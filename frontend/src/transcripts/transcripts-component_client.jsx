@@ -1,8 +1,13 @@
 import { useEffect, useState } from 'react';
-import { formatHMS as formatSeconds } from "../globals";
+import { formatHMS as formatSeconds, startPolling, mergeById, maxId } from "../globals";
 import { SessionService } from '../services/session-service';
 import {TranscriptComponentPage} from './html-pages'
 import { decorateTranscripts } from './transcript-utils'
+
+// 2 s keeps the pod's transcript list feeling live; with after_id most
+// responses are empty, so the cost is one tiny request per tick.
+const POLL_MS = 2000
+const FULL_REFRESH_EVERY = 15 // 30 s at POLL_MS
 
 function TranscriptsComponentClient(props){
   const [transcripts, setTransripts] = useState([]);
@@ -14,21 +19,35 @@ function TranscriptsComponentClient(props){
   const sessionService = new SessionService()
   
   
+  // Live poll (audit G.2): chained so requests never overlap, incremental
+  // (after_id, merged by id) with a full re-fetch every FULL_REFRESH_EVERY
+  // polls so rows edited after insertion are picked up too, paused while
+  // the tab is hidden, backed off on errors, aborted on unmount.
   useEffect(() => {
-    let intervalLoad
-    if ( props.sessionDevice !== null) {
-        fetchTranscript(props.sessionDevice.id)
-
-        intervalLoad = setInterval(() => {
-            fetchTranscript(props.sessionDevice.id)
-        }, 2000)
-    }
-
-    return () => {
-        clearInterval(intervalLoad)
-
-    }
-
+    if (props.sessionDevice === null) return undefined
+    const deviceId = props.sessionDevice.id
+    let rows = []
+    let lastId = 0
+    let polls = 0
+    const stop = startPolling(async (signal) => {
+        const full = polls++ % FULL_REFRESH_EVERY === 0
+        const response = await sessionService.getSessionDeviceTranscriptsForClient(
+            deviceId,
+            0,
+            { signal, afterId: full ? 0 : lastId },
+        )
+        if (response.status !== 200) {
+            console.error("transcripts-component-client: poll failed", response.status)
+            return false
+        }
+        const data = await response.json()
+        rows = full ? data : mergeById(rows, data)
+        lastId = maxId(data, full ? 0 : lastId)
+        setTransripts(rows)
+        return true
+    }, POLL_MS)
+    return stop
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.sessionDevice])
 
 
@@ -50,24 +69,6 @@ function TranscriptsComponentClient(props){
     // eslint-disable-next-line react-hooks/exhaustive-deps
   },[transcripts])
 
-
-const fetchTranscript = async (deviceid) => {
-  try {
-      const response = await sessionService.getSessionDeviceTranscriptsForClient(deviceid)
-
-      if (response.status === 200) {
-          const jsonObj = await response.json()
-          const data = jsonObj
-          setTransripts(data);
-      } else if (response.status === 400 || response.status === 401) {
-          console.error(response, 'no transcript obj fromtranscripts-Component-client.js')
-      }
-
-  } catch (error) {
-      console.error('Transript-component-client error func : requestAccessKey 1', error)
-  }
-
-}
 
 const createDisplayTranscripts = ()=> {
     setDisplayTranscripts(decorateTranscripts(transcripts, showKeywords, showDoA, angleToColor))
