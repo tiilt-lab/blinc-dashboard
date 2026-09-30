@@ -10,6 +10,7 @@ import reactor_safety  # reactor/thread boundary; src/common bootstrapped above
 # the bare sibling import below.
 _rs_sys.path.insert(0, _rs_os.path.dirname(_rs_os.path.abspath(__file__)))
 from frame_payload import build_frame_payload
+from bounded_batch_queue import BoundedBatchQueue
 import logging
 import threading
 import numpy as np
@@ -25,7 +26,7 @@ except ModuleNotFoundError:
     from moviepy import *  # moviepy 2.x moved the public API to the package root  # noqa: F403
 from scipy.io import wavfile
 import traceback
-from queue import Queue,Empty, Full
+from queue import Empty
 # from .VideoMetricProcessor import VideoMetricAnalytics
 
 WAIT_TIMEOUT = 0.05   # 50 ms (tune this)
@@ -334,42 +335,15 @@ class VideoProcessor:
             # self.process_video_analytics(frames_batch, self.facialEmbeddings, batch_idx, time_markers, self.vid_img_dir,self.config.auth_key)
             
 
-    def enqueue_latest_frame_payload(self, payload,candidate_queue_id, timeout=0.5):
-        """
-        Keep only the most recent chunk in the queue.
-        If the queue is full, remove the stale queued chunk and replace it.
-        """
-        candidate_frame_queue = None
-        if candidate_queue_id in self.image_object_detection.frame_queue_manager:
-            candidate_frame_queue = self.image_object_detection.frame_queue_manager[candidate_queue_id]
-        else:
-            self.image_object_detection.frame_queue_manager[candidate_queue_id] = Queue(maxsize=50)
-            candidate_frame_queue = self.image_object_detection.frame_queue_manager[candidate_queue_id]
-
-        try:
-            candidate_frame_queue.put(payload, timeout=timeout)
-            # logging.info("i just inserted frames into the queue for candidate  {0}".format(candidate_queue_id))
-            return True
-        except Full:
-            logging.warning("Frame queue for {0} is full; attempting to replace stale payload with latest payload.".format(candidate_queue_id))
-            pass
-
-        # Queue is full: drop the old queued item
-        try:
-            candidate_frame_queue.get_nowait()  # drop one to make room (result unused)
-            # optional: if you use task_done semantics elsewhere, call task_done here
-            # self.frame_queue.task_done()
-        except Empty:
-            logging.warning("Frame queue for {0} was full but is now empty; failed to replace payload.".format(candidate_queue_id))
-
-        # Try again to insert the latest chunk
-        try:
-            candidate_frame_queue.put_nowait(payload)
-            logging.debug("Replaced stale frame payload with latest payload.")
-            return True
-        except Full:
-            logging.warning("Could not enqueue latest frame payload for {0}; dropping it.".format(candidate_queue_id))
-            return False   
+    def enqueue_latest_frame_payload(self, payload, candidate_queue_id):
+        """Hand a frame batch to the detect worker's per-pod queue: bounded to
+        a couple of batches, drop-oldest, never blocks (audit B.3 — the old
+        50-deep queue pinned ~12 GB per lagging 1080p pod)."""
+        manager = self.image_object_detection.frame_queue_manager
+        candidate_frame_queue = manager.get(candidate_queue_id)
+        if candidate_frame_queue is None:
+            candidate_frame_queue = manager[candidate_queue_id] = BoundedBatchQueue(candidate_queue_id)
+        return candidate_frame_queue.put_latest(payload)
 
 
     def processing(self):

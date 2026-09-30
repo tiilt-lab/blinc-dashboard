@@ -48,6 +48,14 @@ from video_cartoonizer.VideoMetricProcessor import VideoMetricAnalytics
 STOP_SIGNAL = object()
 cm = ConnectionManager()
 
+# Largest legitimate websocket message: one MediaRecorder chunk (the client
+# sends each blob as its own message) of CHUNK_SECONDS at the client's bitrate
+# ceiling — 5 Mbps video + 128 kbps audio (byod-join-component.jsx). The
+# factory caps payloads at 2x that; anything larger is not a video chunk.
+CHUNK_SECONDS = 10
+MAX_VIDEO_CHUNK_BYTES = (5_000_000 + 128_000) * CHUNK_SECONDS // 8   # ~6.4 MB
+MAX_WS_MESSAGE_BYTES = 2 * MAX_VIDEO_CHUNK_BYTES                     # ~12.8 MB
+
 # Aggregate throughput gauge. Sums video bytes actually delivered across all
 # connections (a monotonic module-level counter, so disconnects can't skew
 # the delta) and logs the rate every GAUGE_SECONDS. While any pod is
@@ -212,6 +220,10 @@ class StreamingChunkDecoder:
                 'skipping until the next header', self.label)
             return False
         self.width, self.height = dims
+        # Follow-up (audit B.3): '-vf', 'fps=10,scale=-2:720' would cut a
+        # 1080p pod's decoded-frame memory ~2.25x, but it changes the frames
+        # the analytics models see, so it is deliberately NOT applied here;
+        # memory is bounded downstream instead (bounded_batch_queue).
         self.proc = subprocess.Popen(
             ['ffmpeg', '-v', 'error', '-i', 'pipe:0',
              '-vf', 'fps={0}'.format(self.FPS), '-pix_fmt', 'rgb24',
@@ -800,6 +812,10 @@ if __name__ == '__main__':
     throughput_gauge = task.LoopingCall(_throughput_gauge)
     throughput_gauge.start(GAUGE_SECONDS, now=False)
     factory = WebSocketServerFactory()
+    # Keepalive + payload cap (audit B.6): without pings a dead peer held its
+    # ffmpeg and threads until the 300 s inactivity sweep.
+    factory.setProtocolOptions(autoPingInterval=10, autoPingTimeout=20,
+                               maxMessagePayloadSize=MAX_WS_MESSAGE_BYTES)
     factory.protocol = ServerProtocol
     reactor.listenTCP(int(os.environ.get("DC_VIDEO_WS_PORT", 9003)), factory)
     logging.info('Video Processing Service started.')
