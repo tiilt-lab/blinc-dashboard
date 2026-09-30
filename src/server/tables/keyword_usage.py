@@ -3,7 +3,7 @@ from app import db
 class KeywordUsage(db.Model):
     __tablename__ = 'keyword_usage'
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    transcript_id = db.Column(db.Integer, db.ForeignKey('transcript.id'), nullable=False)
+    transcript_id = db.Column(db.Integer, db.ForeignKey('transcript.id', ondelete='CASCADE'), nullable=False)
     word = db.Column(db.String(64), nullable=False)
     keyword = db.Column(db.String(64), nullable=False)
     similarity = db.Column(db.Float, nullable=False)

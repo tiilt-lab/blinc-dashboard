@@ -119,16 +119,16 @@ def test_updatestudent_is_no_longer_open():
         "updatestudent must gate non-admins behind a name-match"
 
 
-def test_delete_user_removes_metrics_before_devices():
-    # SpeakerVideoMetrics/HrMetrics FK session_device with no cascade — they
-    # must be deleted before the SessionDevice bulk delete or delete_user 500s.
+def test_delete_user_relies_on_db_cascades():
+    # Metrics, transcripts and pods cascade from the session at the database
+    # (migrations e2b3c4d5f6a7 / 2a3b4c5d6e7f). A hand-written cascade here is
+    # what broke delete_user before (FK 1451); it must not grow back.
     s = _read("server", "database.py")
     m = re.search(r"def delete_user\(.*?db\.session\.commit\(\)", s, re.S)
     assert m, "delete_user not found"
     body = m.group(0)
-    vid = body.index("SpeakerVideoMetrics")
-    dev = body.index("query(SessionDevice)")
-    assert vid < dev, "video metrics must be deleted before SessionDevice"
+    for cls in ("SpeakerVideoMetrics", "SpeakerHrMetrics", "Transcript", "SessionDevice"):
+        assert "query(%s)" % cls not in body, "delete_user hand-cascades %s" % cls
 
 
 def test_device_in_session_guard_is_never_inlined():

@@ -15,6 +15,10 @@ class SpeakerHrMetrics(db.Model):
     heart_rate = db.Column(db.Integer, nullable=False)
     rr_ms = db.Column(db.String(64))
 
+    # Declared by migration c4d5e6f7a8b9 but never in the model, so
+    # autogenerate kept proposing to drop it.
+    __table_args__ = (db.Index('ix_speaker_hr_metrics_device', 'session_device_id', 'time_stamp'),)
+
     def __hash__(self):
         return hash((self.id))
 

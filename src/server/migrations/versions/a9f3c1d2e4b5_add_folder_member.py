@@ -40,6 +40,6 @@ def upgrade():
 
 
 def downgrade():
-    op.drop_index('ix_folder_member_user_id', table_name='folder_member')
-    op.drop_index('ix_folder_member_folder_id', table_name='folder_member')
+    # drop_table takes the indexes with it; dropping them first fails
+    # (1553, the FKs need them).
     op.drop_table('folder_member')

@@ -10,6 +10,10 @@ class SpeakerVideoMetrics(db.Model):
     attention_level = db.Column(db.Integer)
     object_on_focus = db.Column(db.String(128))
 
+    # (session_device_id, time_stamp): the per-pod timeline reads
+    # (migration 1f2e3d4c5b6a records the live index).
+    __table_args__ = (db.Index('idx_svm_device_time', 'session_device_id', 'time_stamp'),)
+
     # keywords = db.relationship("KeywordUsage", lazy='joined', uselist=True)
     # metrics = db.relationship("SpeakerTranscriptMetrics", back_populates="transcript", cascade="all, delete",passive_deletes=True)
 

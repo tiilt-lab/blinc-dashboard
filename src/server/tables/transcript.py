@@ -3,7 +3,7 @@ from app import db
 class Transcript(db.Model):
     __tablename__ = 'transcript'
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    session_device_id = db.Column(db.Integer, db.ForeignKey('session_device.id'), nullable=False)
+    session_device_id = db.Column(db.Integer, db.ForeignKey('session_device.id', ondelete='CASCADE'), nullable=False)
     start_time = db.Column(db.Integer, nullable=False)
     length = db.Column(db.Integer, nullable=False)
     question = db.Column(db.Boolean, nullable=False)
@@ -23,8 +23,12 @@ class Transcript(db.Model):
     # nullable. Requires migration; older rows read as None.
     voice_features = db.Column(db.Text, nullable=True)
 
-    keywords = db.relationship("KeywordUsage", lazy='joined', uselist=True)
+    keywords = db.relationship("KeywordUsage", lazy='joined', uselist=True, cascade="all, delete", passive_deletes=True)
     metrics = db.relationship("SpeakerTranscriptMetrics", back_populates="transcript", cascade="all, delete",passive_deletes=True)
+
+    # (session_device_id, start_time): every per-pod transcript window read
+    # (migration 1f2e3d4c5b6a records the live index).
+    __table_args__ = (db.Index('idx_transcript_device_start', 'session_device_id', 'start_time'),)
 
     def __hash__(self):
         return hash((self.id))

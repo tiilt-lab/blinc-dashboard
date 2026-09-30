@@ -39,5 +39,6 @@ def upgrade():
 
 
 def downgrade():
-    op.drop_index('ix_speaker_hr_metrics_device', table_name='speaker_hr_metrics')
+    # drop_table takes the index with it; dropping it first fails (1553,
+    # the FK on session_device_id needs it).
     op.drop_table('speaker_hr_metrics')

@@ -87,6 +87,38 @@ jobs:
           # fail on history that isn't part of this branch.
           ./gitleaks detect --config .gitleaks.toml --redact --no-banner --log-opts="HEAD"
 
+  migrations:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: blinc
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 24
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      # Only what the chain itself needs: env.py runs without the Flask app
+      # and run_migrations.py builds the Alembic config from the URL below.
+      # Pinned to the versions the deployment's venv uses.
+      - run: pip install alembic==1.18.5 sqlalchemy==2.0.51 mysql-connector-python==9.7.0
+      # Proves `upgrade head` rebuilds production's schema from an empty
+      # database and that every downgrade still runs: head -> base -> head.
+      # tests/test_migration_chain.py covers the chain's shape; this covers
+      # the DDL against a real MySQL 8.
+      - run: python src/server/migrations/run_migrations.py roundtrip
+        env:
+          DC_DATABASE_URL: mysql+mysqlconnector://root:root@127.0.0.1:3306/blinc
+
 # E2E tests (tests/e2e/) exercise a live deployment with real credentials
 # and are run manually — see the header of tests/e2e/join-record.spec.js.
 # They stay out of CI: this repository is public, and no deployment secrets

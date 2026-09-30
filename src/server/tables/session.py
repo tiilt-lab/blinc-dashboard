@@ -10,10 +10,12 @@ class Session(db.Model):
     creation_date = db.Column(db.DateTime, nullable=False)
     end_date = db.Column(db.DateTime)
     passcode = db.Column(db.String(64))
-    folder = db.Column(db.Integer, db.ForeignKey('folder.id'), nullable=True)
-    topic_model_id = db.Column(db.Integer, db.ForeignKey('topic_model.id'), nullable=True)
+    # SET NULL: deleting a folder or topic model lifts the session out of it;
+    # owner_id keeps no rule on purpose, sessions are deleted explicitly.
+    folder = db.Column(db.Integer, db.ForeignKey('folder.id', ondelete='SET NULL'), nullable=True)
+    topic_model_id = db.Column(db.Integer, db.ForeignKey('topic_model.id', ondelete='SET NULL'), nullable=True)
 
-    keywords = db.relationship("Keyword", lazy='joined', uselist=True)
+    keywords = db.relationship("Keyword", lazy='joined', uselist=True, cascade="all, delete", passive_deletes=True)
 
     # passcode: the anonymous join lookup; (owner_id, creation_date): the
     # per-owner sessions list order (migration f8ae4e72c79c).

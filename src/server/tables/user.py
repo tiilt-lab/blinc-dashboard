@@ -21,7 +21,7 @@ class User(db.Model):
     locked = db.Column(db.Boolean, nullable=False)
     creation_date = db.Column(db.DateTime, nullable=False)
 
-    api_client = db.relationship("APIClient", lazy='joined', uselist=False)
+    api_client = db.relationship("APIClient", lazy='joined', uselist=False, cascade="all, delete", passive_deletes=True)
 
     # The register/invite paths check-then-insert; UNIQUE closes that race
     # (migration f8ae4e72c79c).

@@ -21,11 +21,34 @@ logger = logging.getLogger('alembic.env')
 # for 'autogenerate' support
 # from myapp import mymodel
 # target_metadata = mymodel.Base.metadata
-from flask import current_app
-config.set_main_option(
-    'sqlalchemy.url', current_app.config.get(
-        'SQLALCHEMY_DATABASE_URI').replace('%', '%%'))
-target_metadata = current_app.extensions['migrate'].db.metadata
+# Normally run through `flask db ...`, where the app supplies the URL and the
+# model metadata. run_migrations.py (CI) runs the chain with no Flask app at
+# all: it sets sqlalchemy.url itself, and nothing here needs the models.
+try:
+    from flask import current_app
+    config.set_main_option(
+        'sqlalchemy.url', current_app.config.get(
+            'SQLALCHEMY_DATABASE_URI').replace('%', '%%'))
+    target_metadata = current_app.extensions['migrate'].db.metadata
+    configure_args = current_app.extensions['migrate'].configure_args
+except (ImportError, RuntimeError):  # no Flask, or no application context
+    target_metadata = None
+    configure_args = {}
+
+# Tables that exist in the database (and in this chain) but have no model:
+# research-analysis tables written by other tooling. Without this list
+# autogenerate proposes dropping every one of them.
+MODEL_LESS_TABLES = frozenset({
+    'seven_cs_analysis', 'seven_cs_coded_segment',
+    'concept_session', 'concept_node', 'concept_edge', 'concept_cluster',
+    'cluster_node_mapping', 'llm_metrics', 'user_system_interaction',
+})
+
+
+def include_object(object, name, type_, reflected, compare_to):
+    if type_ == 'table' and name in MODEL_LESS_TABLES:
+        return False
+    return True
 
 # other values from the config, defined by the needs of env.py,
 # can be acquired:
@@ -47,7 +70,8 @@ def run_migrations_offline():
     """
     url = config.get_main_option("sqlalchemy.url")
     context.configure(
-        url=url, target_metadata=target_metadata, literal_binds=True
+        url=url, target_metadata=target_metadata, literal_binds=True,
+        include_object=include_object,
     )
 
     with context.begin_transaction():
@@ -83,7 +107,8 @@ def run_migrations_online():
             connection=connection,
             target_metadata=target_metadata,
             process_revision_directives=process_revision_directives,
-            **current_app.extensions['migrate'].configure_args
+            include_object=include_object,
+            **configure_args
         )
 
         with context.begin_transaction():

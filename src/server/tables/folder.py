@@ -7,8 +7,8 @@ class Folder(db.Model):
     __tablename__ = 'folder'
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     name = db.Column(db.String(64))
-    owner_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    parent = db.Column(db.Integer, db.ForeignKey('folder.id'), nullable=True)
+    owner_id = db.Column(db.Integer, db.ForeignKey('user.id', ondelete='CASCADE'), nullable=False)
+    parent = db.Column(db.Integer, db.ForeignKey('folder.id', ondelete='SET NULL'), nullable=True)
     creation_date = db.Column(db.DateTime, nullable=True)
 
     NAME_MAX_LENGTH = 64

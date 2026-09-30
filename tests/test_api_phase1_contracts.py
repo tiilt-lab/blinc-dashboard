@@ -60,7 +60,9 @@ def test_new_migration_extends_the_previous_head_and_is_the_only_head():
             if d is not None:
                 referenced.add(d)
     assert referenced <= set(revs), f"dangling down_revision(s): {referenced - set(revs)}"
-    assert set(revs) - referenced == {NEW_REVISION}
+    # Phase 2 chained further migrations after this one; the invariant that
+    # matters is a single head (tests/test_migration_chain.py names it).
+    assert len(set(revs) - referenced) == 1
 
 
 def test_migration_index_names_are_unique_new_and_fully_reverted():

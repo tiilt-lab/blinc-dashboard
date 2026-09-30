@@ -10,7 +10,7 @@ class APIClient(db.Model):
     client_id = db.Column(db.String(64),primary_key=True, nullable=False)
     client_secret_hash = db.Column(db.String(128), nullable=False)
     client_token_hash = db.Column(db.String(128), nullable=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id', ondelete='CASCADE'), nullable=False)
     salt = db.Column(db.String(64), nullable=False)
     expiration_date = db.Column(db.DateTime, nullable=True)
 

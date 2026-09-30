@@ -5,7 +5,7 @@ from utility import verify_characters
 class TopicModel(db.Model):
     __tablename__ = 'topic_model'
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    owner_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    owner_id = db.Column(db.Integer, db.ForeignKey('user.id', ondelete='CASCADE'), nullable=False)
     creation_date = db.Column(db.DateTime, nullable=False)
     name = db.Column(db.String(64))
     summary = db.Column(db.String(8000))

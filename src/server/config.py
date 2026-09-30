@@ -45,7 +45,9 @@ def database_user():
     return "{0}:{1}".format(user, user)
 
 def database_name():
-    return str(config['server'].get('database_name', 'discussion_capture'))
+    # DC_DATABASE_NAME points one process (e.g. a migration check) at another
+    # database on the same server without editing config.ini.
+    return os.environ.get('DC_DATABASE_NAME') or str(config['server'].get('database_name', 'discussion_capture'))
 
 def root_dir():
     return str(config['rootpath']['root_dir'])

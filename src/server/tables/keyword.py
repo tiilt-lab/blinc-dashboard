@@ -3,7 +3,7 @@ from app import db
 class Keyword(db.Model):
     __tablename__ = 'keyword'
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    session_id = db.Column(db.Integer, db.ForeignKey('session.id'), nullable=False)
+    session_id = db.Column(db.Integer, db.ForeignKey('session.id', ondelete='CASCADE'), nullable=False)
     keyword = db.Column(db.String(64))
 
     KEYWORD_MAX_LENGTH = 64

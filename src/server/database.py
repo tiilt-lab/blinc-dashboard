@@ -395,6 +395,8 @@ def add_topic_model(user_id, name, summary):
   return topic_model
 
 def delete_topic_model(topic_model_id):
+  # session.topic_model_id is ON DELETE SET NULL (migration 2a3b4c5d6e7f), so
+  # a model still attached to sessions no longer fails with FK 1451.
   db.session.query(TopicModel).filter(TopicModel.id == topic_model_id).delete(synchronize_session='fetch')
   db.session.commit()
   return True
@@ -463,7 +465,7 @@ def update_keyword_list(keyword_list_id, name=None, keywords=None):
     return None
 
 def delete_keyword_list(keyword_list_id):
-    db.session.query(KeywordListItem).filter(KeywordListItem.keyword_list_id == keyword_list_id).delete(synchronize_session='fetch')
+    # Items cascade at the database (migration 2a3b4c5d6e7f).
     db.session.query(KeywordList).filter(KeywordList.id == keyword_list_id).delete(synchronize_session='fetch')
     db.session.commit()
     return True
@@ -637,31 +639,9 @@ def delete_session(session_id):
     session_to_delete = get_sessions(id=session_id, active=True)
     if session_to_delete:
         return False
-    
-    sub_query = db.session.query(Transcript.id).\
-        filter(Transcript.session_device_id == SessionDevice.id).\
-        filter(SessionDevice.session_id == session_id).subquery()
-
-    sub_query2 = db.session.query(SpeakerVideoMetrics.id).\
-        filter(SpeakerVideoMetrics.session_device_id == SessionDevice.id).\
-        filter(SessionDevice.session_id == session_id).subquery()
-
-    sub_query3 = db.session.query(SpeakerHrMetrics.id).\
-        filter(SpeakerHrMetrics.session_device_id == SessionDevice.id).\
-        filter(SessionDevice.session_id == session_id).subquery()
-
-    db.session.query(KeywordUsage).filter(KeywordUsage.transcript_id.in_(sub_query)).delete(synchronize_session='fetch')
-    db.session.query(Keyword).filter(Keyword.session_id == session_id).delete()
-    db.session.query(Transcript).filter(Transcript.id.in_(sub_query)).delete(synchronize_session='fetch')
-    db.session.query(SpeakerVideoMetrics).filter(SpeakerVideoMetrics.id.in_(sub_query2)).delete(synchronize_session='fetch')
-    db.session.query(SpeakerHrMetrics).filter(SpeakerHrMetrics.id.in_(sub_query3)).delete(synchronize_session='fetch')
-    # Rater/Rating/SurveyResponse hold sessionid as a plain int (no FK), so
-    # nothing cascades — clear them here or they orphan forever pointing at a
-    # deleted session.
-    db.session.query(Rating).filter(Rating.sessionid == session_id).delete()
-    db.session.query(Rater).filter(Rater.sessionid == session_id).delete()
-    db.session.query(SurveyResponse).filter(SurveyResponse.sessionid == session_id).delete()
-    db.session.query(SessionDevice).filter(SessionDevice.session_id == session_id).delete()
+    # Pods, transcripts, keyword hits, metrics, LLM reports, ratings and
+    # surveys all cascade from the session row (migration 2a3b4c5d6e7f), so
+    # this is one statement and cannot race a late post-hoc insert.
     db.session.query(Session).filter(Session.id == session_id).delete()
     db.session.commit()
     return True
@@ -778,10 +758,7 @@ def session_device_has_data(session_device_id):
     return False
 
 def delete_session_device(session_device_id):
-    db.session.query(KeywordUsage).filter(KeywordUsage.transcript_id == Transcript.id).filter(Transcript.session_device_id == session_device_id).delete(synchronize_session='fetch')
-    db.session.query(Transcript).filter(Transcript.session_device_id == session_device_id).delete(synchronize_session='fetch')
-    db.session.query(SpeakerVideoMetrics).filter(SpeakerVideoMetrics.session_device_id == session_device_id).delete(synchronize_session='fetch')
-    db.session.query(SpeakerHrMetrics).filter(SpeakerHrMetrics.session_device_id == session_device_id).delete(synchronize_session='fetch')
+    # Transcripts, metrics and reports cascade from the pod row (2a3b4c5d6e7f).
     db.session.query(SessionDevice).filter(SessionDevice.id == session_device_id).delete()
     db.session.commit()
     return True
@@ -1047,45 +1024,18 @@ def add_user(email, role='user', password=None):
 
 def delete_user(id):
     user = get_users(id=id)
-    if user:
-        delete_api_client(user.id)
-        keywordListItemSubQuery = db.session.query(KeywordList.id).filter(KeywordList.owner_id == id).subquery()
-        transcriptSubQuery = db.session.query(Transcript.id).filter(Transcript.session_device_id == SessionDevice.id).filter(SessionDevice.session_id == Session.id).filter(Session.owner_id == id).subquery()
-        sessionSubQuery = db.session.query(Session.id).filter(Session.owner_id == id).subquery()
-        db.session.query(KeywordListItem).filter(KeywordListItem.keyword_list_id.in_(keywordListItemSubQuery)).delete(synchronize_session='fetch')
-        db.session.query(KeywordList).filter(KeywordList.owner_id == id).delete()
-        db.session.query(KeywordUsage).filter(KeywordUsage.transcript_id.in_(transcriptSubQuery)).delete(synchronize_session='fetch')
-        db.session.query(Transcript).filter(Transcript.id.in_(transcriptSubQuery)).delete(synchronize_session='fetch')
-        db.session.query(Keyword).filter(Keyword.session_id.in_(sessionSubQuery)).delete(synchronize_session='fetch')
-        # SpeakerVideoMetrics/SpeakerHrMetrics FK session_device.id with NO
-        # ondelete cascade, so they MUST be deleted before their pods — the
-        # old code went straight to SessionDevice and every delete_user for a
-        # user who ever ran a video/HR session hit FK error 1451 and 500ed.
-        # delete_session does exactly this; mirror it. Rater/Rating/Survey
-        # rows have no FK at all and were orphaned forever — clear them too.
-        deviceSubQuery = db.session.query(SessionDevice.id).filter(SessionDevice.session_id.in_(sessionSubQuery)).subquery()
-        db.session.query(SpeakerVideoMetrics).filter(SpeakerVideoMetrics.session_device_id.in_(deviceSubQuery)).delete(synchronize_session='fetch')
-        db.session.query(SpeakerHrMetrics).filter(SpeakerHrMetrics.session_device_id.in_(deviceSubQuery)).delete(synchronize_session='fetch')
-        db.session.query(Rating).filter(Rating.sessionid.in_(sessionSubQuery)).delete(synchronize_session='fetch')
-        db.session.query(Rater).filter(Rater.sessionid.in_(sessionSubQuery)).delete(synchronize_session='fetch')
-        db.session.query(SurveyResponse).filter(SurveyResponse.sessionid.in_(sessionSubQuery)).delete(synchronize_session='fetch')
-        db.session.query(SessionDevice).filter(SessionDevice.session_id.in_(sessionSubQuery)).delete(synchronize_session='fetch')
-        db.session.query(Session).filter(Session.owner_id == id).delete()
-        folder_ids = [folder.id for folder in db.session.query(Folder).filter(Folder.owner_id == id).all()]
-        # A shared folder can hold other people's sessions and subfolders.
-        # Deleting its owner must not delete (or FK-block on) their work, so
-        # lift those out to their owners' top level first.
-        if folder_ids:
-            db.session.query(Session).filter(Session.folder.in_(folder_ids)) \
-                .update({Session.folder: None}, synchronize_session='fetch')
-            db.session.query(Folder).filter(Folder.parent.in_(folder_ids), Folder.owner_id != id) \
-                .update({Folder.parent: None}, synchronize_session='fetch')
-        _delete_folder_bulk(folder_ids)
-        db.session.delete(user)
-        db.session.commit()
-        return True
-    else:
+    if not user:
         return False
+    # session.owner_id has no ON DELETE rule on purpose: an account's sessions
+    # are deleted explicitly here and everything under them cascades. The
+    # user's folders, keyword lists, topic models, API client and tokens
+    # cascade from the user row; ON DELETE SET NULL on session.folder and
+    # folder.parent lifts other people's sessions and subfolders out of the
+    # deleted (shared) folders to their owners' top level (2a3b4c5d6e7f).
+    db.session.query(Session).filter(Session.owner_id == id).delete(synchronize_session=False)
+    db.session.delete(user)
+    db.session.commit()
+    return True
 
 def update_user(user_id, data):
     user = get_users(id=user_id)
@@ -1400,16 +1350,14 @@ def delete_folder(folder_id):
     if len([session for session in sessions_to_delete if session.end_date is None]) > 0:
         return False, 'Cannot delete folder that contains an active discussion.'
 
-    for session in sessions_to_delete:
-        delete_session(session.id)
-    _delete_folder_bulk(folder_ids)
+    # The sessions go explicitly: session.folder is ON DELETE SET NULL, so
+    # dropping the folders alone would lift them to the top level, not
+    # remove them. Each session cascades; folder.parent SET NULL lets the
+    # tree go in one statement (migration 2a3b4c5d6e7f).
+    db.session.query(Session).filter(Session.folder.in_(folder_ids)).delete(synchronize_session=False)
+    db.session.query(Folder).filter(Folder.id.in_(folder_ids)).delete(synchronize_session=False)
+    db.session.commit()
     return True, 'Folder deleted successfully.'
-
-def _delete_folder_bulk(folder_ids):
-    db.session.query(Folder).filter(Folder.id.in_(folder_ids)).update({Folder.parent: None}, synchronize_session='fetch')
-    db.session.commit()
-    db.session.query(Folder).filter(Folder.id.in_(folder_ids)).delete(synchronize_session='fetch')
-    db.session.commit()
 
 def get_dependents(folder_id = None):
     dependents = []
@@ -1467,6 +1415,18 @@ def use_account_tokens(user_id):
         AccountToken.user_id == user_id, AccountToken.used_at.is_(None)) \
         .update({AccountToken.used_at: now}, synchronize_session='fetch')
     db.session.commit()
+
+def delete_expired_account_tokens(max_age):
+    # Retention: used or expired links older than max_age are of no further
+    # use (a token is only ever looked up unused and unexpired). Live tokens
+    # are never touched. Returns the number of rows removed.
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    count = db.session.query(AccountToken).filter(
+        AccountToken.created_at < now - max_age,
+        or_(AccountToken.used_at.isnot(None), AccountToken.expires_at < now)) \
+        .delete(synchronize_session=False)
+    db.session.commit()
+    return count
 
 def invite_user(email, role='user'):
     # An account for someone who has not signed up yet: a random password
@@ -1940,11 +1900,8 @@ def delete_pod_analysis(session_device_id, scope='audio'):
     if scope == 'video':
         db.session.execute(text("DELETE FROM speaker_video_metrics WHERE session_device_id=:d"), {"d": session_device_id})
     else:
-        # keyword_usage has no ON DELETE CASCADE; children with CASCADE
-        # (speaker_transcript_metrics, seven_cs_coded_segment) follow the parent.
-        db.session.execute(text("""DELETE ku FROM keyword_usage ku
-            JOIN transcript t ON ku.transcript_id = t.id
-            WHERE t.session_device_id = :d"""), {"d": session_device_id})
+        # keyword_usage, speaker_transcript_metrics and seven_cs_coded_segment
+        # cascade from the transcript row.
         db.session.execute(text("DELETE FROM transcript WHERE session_device_id=:d"), {"d": session_device_id})
     db.session.commit()
 

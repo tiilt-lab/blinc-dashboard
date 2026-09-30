@@ -6,11 +6,11 @@ from utility import verify_characters
 class KeywordList(db.Model):
     __tablename__ = 'keyword_list'
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    owner_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    owner_id = db.Column(db.Integer, db.ForeignKey('user.id', ondelete='CASCADE'), nullable=False)
     creation_date = db.Column(db.DateTime, nullable=False)
     name = db.Column(db.String(64))
 
-    keywords = db.relationship("KeywordListItem", lazy='joined', uselist=True)
+    keywords = db.relationship("KeywordListItem", lazy='joined', uselist=True, cascade="all, delete", passive_deletes=True)
 
     NAME_MAX_LENGTH = 64
     NAME_CHARS = 'a-zA-Z0-9\': '

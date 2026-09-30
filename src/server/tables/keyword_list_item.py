@@ -3,7 +3,7 @@ from utility import verify_characters
 
 class KeywordListItem(db.Model):
     __tablename__ = 'keyword_list_item'
-    keyword_list_id = db.Column(db.Integer, db.ForeignKey('keyword_list.id'), primary_key=True, nullable=False)
+    keyword_list_id = db.Column(db.Integer, db.ForeignKey('keyword_list.id', ondelete='CASCADE'), primary_key=True, nullable=False)
     keyword = db.Column(db.String(64), primary_key=True, nullable=False)
 
     KEYWORD_MAX_LENGTH = 64

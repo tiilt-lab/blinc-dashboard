@@ -1,12 +1,11 @@
 from app import db
-from sqlalchemy import UniqueConstraint
 from utility import verify_characters
 import uuid
 
 class SessionDevice(db.Model):
     __tablename__ = 'session_device'
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    session_id = db.Column(db.Integer, db.ForeignKey('session.id'), nullable=False)
+    session_id = db.Column(db.Integer, db.ForeignKey('session.id', ondelete='CASCADE'), nullable=False)
     device_id = db.Column(db.Integer, db.ForeignKey('device.id'), nullable=True)
     processing_key = db.Column(db.String(64), nullable=True)
     name = db.Column(db.String(64))
@@ -29,12 +28,12 @@ class SessionDevice(db.Model):
     llmquestionanswer = db.relationship("LLMQuestionAnswer", back_populates="session_device", cascade="all, delete",passive_deletes=True)
     sessionSynthesizedReports = db.relationship("SessionSynthesizedReport", back_populates="session_device", cascade="all, delete",passive_deletes=True)
 
-    # Must live in __table_args__ — as a bare class-body expression the
-    # constraint object was discarded and no constraint ever existed.
-    __table_args__ = (UniqueConstraint('session_id', 'name', name='unique_session_name'),
-                      # Looked up on every pod request and callback; UNIQUE so
-                      # a key can never resolve to two pods (migration f8ae4e72c79c).
-                      db.Index('ux_sd_processing_key', 'processing_key', unique=True))
+    # No UNIQUE on (session_id, name): no deployment ever had one, and
+    # create_byod_session_device converges concurrent same-name joins itself
+    # (the model used to declare one; migration 1f2e3d4c5b6a records the live
+    # schema). ux_sd_processing_key: looked up on every pod request and
+    # callback; UNIQUE so a key can never resolve to two pods (f8ae4e72c79c).
+    __table_args__ = (db.Index('ux_sd_processing_key', 'processing_key', unique=True),)
 
     KEY_MAX_LENGTH = 64
     NAME_MAX_LENGTH = 64

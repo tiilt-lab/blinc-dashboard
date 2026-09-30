@@ -34,5 +34,6 @@ def upgrade():
 
 
 def downgrade():
-    op.drop_index('ix_account_token_user_id', table_name='account_token')
+    # drop_table takes the index with it; dropping it first fails (1553,
+    # the FK on user_id needs it).
     op.drop_table('account_token')

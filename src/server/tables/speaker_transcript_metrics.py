@@ -3,7 +3,7 @@ from app import db
 class SpeakerTranscriptMetrics(db.Model):
     __tablename__ = 'speaker_transcript_metrics'
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    speaker_id = db.Column(db.Integer, db.ForeignKey('speaker.id'), nullable=True)
+    speaker_id = db.Column(db.Integer, db.ForeignKey('speaker.id', ondelete='SET NULL'), nullable=True)
     transcript_id = db.Column(db.Integer, db.ForeignKey('transcript.id', ondelete="CASCADE"), nullable=False)
     participation_score = db.Column(db.Float)
     internal_cohesion = db.Column(db.Float)
