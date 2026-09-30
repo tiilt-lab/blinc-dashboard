@@ -14,7 +14,7 @@ astor==0.8.1
 attrs==26.1.0
 audioop-lts==0.2.2
 audioread==3.1.0
-autobahn==26.6.2
+autobahn==26.7.1
 Automat==25.4.16
 av==18.0.0
 bidict==0.23.1
