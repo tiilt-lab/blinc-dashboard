@@ -1,4 +1,7 @@
-"""Shared CrisperWhisper worker resilience (audit B.2 / E.3).
+"""CrisperWhisper worker slot resilience (audit B.2 / E.3).
+
+A slot (_WorkerSlot) is what the single shared worker used to be; the pool
+that composes slots is covered by test_asr_worker_pool.py.
 
 A failed spawn or a dead worker used to be retried on every window of every
 pod, each retry a 7s model load (or a 180s timeout) under the shared lock,
@@ -60,7 +63,10 @@ def test_worker_stderr_goes_to_a_log_file_not_devnull():
     with open(cw.__file__) as f:
         src = f.read()
     assert "stderr=subprocess.DEVNULL" not in src
-    assert cw._STDERR_LOG.endswith(os.path.join("audio_processing", "crisper_worker.stderr.log"))
+    # One log per pool slot: audio_processing/crisper_worker.<slot>.stderr.log
+    assert (cw._STDERR_LOG_TEMPLATE % 0).endswith(
+        os.path.join("audio_processing", "crisper_worker.0.stderr.log"))
+    assert cw._WorkerSlot(1).stderr_log.endswith("crisper_worker.1.stderr.log")
 
 
 class _Proc:
@@ -80,7 +86,7 @@ def _no_spawn(*a, **k):
 
 
 def test_open_breaker_refuses_at_once_without_spawning(monkeypatch):
-    w = cw._SharedWorker()
+    w = cw._WorkerSlot()
     monkeypatch.setattr(cw.subprocess, "Popen", _no_spawn)
     monkeypatch.setattr(cw, "free_vram_mib", lambda run=None: None)
     w.backoff.record_failure(time.time())
@@ -91,7 +97,7 @@ def test_open_breaker_refuses_at_once_without_spawning(monkeypatch):
 
 
 def test_low_vram_refuses_spawn_opens_breaker_and_tells_pods_once(monkeypatch):
-    w = cw._SharedWorker()
+    w = cw._WorkerSlot()
     got = []
     w.add_listener(lambda s, m: got.append((s, m)))
     monkeypatch.setattr(cw, "free_vram_mib", lambda run=None: 1000)
@@ -110,7 +116,7 @@ def test_low_vram_refuses_spawn_opens_breaker_and_tells_pods_once(monkeypatch):
 
 
 def test_served_window_recovers_state_and_resets_breaker(monkeypatch):
-    w = cw._SharedWorker()
+    w = cw._WorkerSlot()
     got = []
     w.add_listener(lambda s, m: got.append(s))
     w._set_state("degraded", cw.MSG_RESTARTING)
@@ -124,7 +130,7 @@ def test_served_window_recovers_state_and_resets_breaker(monkeypatch):
 
 
 def test_request_failure_kills_worker_and_degrades(monkeypatch):
-    w = cw._SharedWorker()
+    w = cw._WorkerSlot()
     got = []
     w.add_listener(lambda s, m: got.append((s, m)))
     proc = _Proc()

@@ -7,18 +7,25 @@ words. Weights are non-commercial-research licensed; inference code is MIT.
 
 The package needs its own CTranslate2 fork, so it lives in src/venv-crisper
 and all inference goes through crisper_worker.py subprocesses:
-  - CrisperWhisperASR (live): all pods share ONE persistent --serve worker
-    (one ~4GB model copy on the GPU instead of one per pod). A window
-    transcribes in ~1s and each pod produces one per 12s, so serialized
-    requests stay far under budget; the worker is reaped after 15 idle
-    minutes to give the GPU memory back between sessions. A failed spawn or
-    a dead worker opens a circuit breaker (SpawnBackoff, 30s -> 300s) and
-    every live pod is told ASR is degraded until a window succeeds again.
+  - CrisperWhisperASR (live): every pod's windows go through one process-
+    wide WorkerPool of DC_ASR_WORKERS (default 2) persistent --serve workers,
+    each a ~3-4GB model copy on the GPU. A window transcribes in ~1s and a
+    pod produces one per 12s, so one worker saturates at ~10-12 talking
+    pods; the second slot is spawned lazily — only once a window has waited
+    on a busy first slot — and only while the card still has
+    MIN_FREE_VRAM_MIB free. Windows are dispatched FIFO across pods (no pod
+    can hog a slot); a pod's own windows stay in order because its flush
+    thread is sequential. A slot is reaped after 15 idle minutes to give
+    the GPU memory back. A failed spawn or a dead worker opens that slot's
+    circuit breaker (SpawnBackoff, 30s -> 300s); a window fails over to
+    another slot at once, and the pods are told ASR is degraded only when
+    no slot can serve, ok again as soon as a window succeeds.
   - CrisperWhisperPosthocASR: --oneshot on the whole recording in its own
     process (so a long file can never head-of-line-block live captions),
     then emits gap-segmented Google-shaped AsrResults (same contract as
     Qwen3ASR; speaker attribution happens downstream via fingerprints).
 """
+import functools
 import json
 import logging
 import os
@@ -28,24 +35,44 @@ import tempfile
 import threading
 import time
 import wave
+from collections import deque
 
 from .base_asr import (BaseASR, AsrResult, PosthocFileASR, worker_python,
                        run_json_worker, POSTHOC_WORKER_TIMEOUT)
 from asr_ingest import WindowAssembler  # audio_processing/ is on sys.path
 
 _WORKER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "crisper_worker.py")
-# Worker stderr, appended for the life of the service. Under
-# audio_processing/ so the existing logrotate rule (*.log, copytruncate)
-# covers it; a death used to be unrecordable because stderr was DEVNULL.
-_STDERR_LOG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                           "crisper_worker.stderr.log")
-_stderr_fh = None
+# Per-slot worker stderr, appended for the life of the service:
+# audio_processing/crisper_worker.<slot>.stderr.log. Under audio_processing/
+# so the existing logrotate rule (*.log, copytruncate) covers it; a death
+# used to be unrecordable because stderr was DEVNULL.
+_STDERR_LOG_TEMPLATE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "crisper_worker.%d.stderr.log")
 
 DEFAULT_MODEL = "nyralabs/CrisperWhisper2.0_large"
 
 # Refuse to spawn when the GPU has less than this free: the model needs ~4GB
-# and a spawn that OOMs takes the 180s start timeout under the shared lock.
+# and a spawn that OOMs takes the 180s start timeout under the slot's lock.
+# Checked at every spawn, so a second slot never lands on a full card.
 MIN_FREE_VRAM_MIB = 3500
+
+# Live worker pool size. 1 is exactly the pre-pool single shared worker.
+WORKERS_ENV = "DC_ASR_WORKERS"
+DEFAULT_WORKERS = 2
+
+# One window's budget: the worker's reply deadline, and also the longest a
+# window waits in the pool's FIFO for a free slot (past it the window is
+# dropped rather than served minutes stale).
+REQUEST_TIMEOUT = 120.0
+SPAWN_TIMEOUT = 180.0
+
+# "Capacity reached" signal: a window waited longer than CAPACITY_WAIT_SECONDS
+# for a free slot. Logged at WARNING, at most once per CAPACITY_WARNING_INTERVAL.
+# The load generator greps for this exact text.
+CAPACITY_WARNING = "CrisperWhisper: ASR capacity reached"
+CAPACITY_WAIT_SECONDS = 5.0
+CAPACITY_WARNING_INTERVAL = 60.0
 
 # Short human text for the pod client's asr_status banner.
 MSG_RESTARTING = "Live captions paused: the speech recognizer is restarting."
@@ -58,22 +85,14 @@ def _worker_python():
     return worker_python("venv-crisper", 3)
 
 
-def _stderr_file():
-    global _stderr_fh
-    if _stderr_fh is None:
-        _stderr_fh = open(_STDERR_LOG, "ab", buffering=0)
-    return _stderr_fh
-
-
-def _stderr_tail(nbytes=600):
-    """Last lines the worker wrote, for the failure WARNING."""
+def pool_size(environ=os.environ):
+    """DC_ASR_WORKERS (default 2, minimum 1)."""
+    raw = environ.get(WORKERS_ENV, str(DEFAULT_WORKERS))
     try:
-        with open(_STDERR_LOG, "rb") as f:
-            f.seek(0, os.SEEK_END)
-            f.seek(max(0, f.tell() - nbytes))
-            return f.read().decode("utf8", "replace").strip()
-    except OSError:
-        return ""
+        return max(1, int(raw))
+    except ValueError:
+        logging.warning("%s=%r is not an integer; using %d", WORKERS_ENV, raw, DEFAULT_WORKERS)
+        return DEFAULT_WORKERS
 
 
 def free_vram_mib(run=subprocess.run):
@@ -90,7 +109,7 @@ def free_vram_mib(run=subprocess.run):
 
 
 class SpawnBackoff:
-    """Circuit breaker for (re)spawning the shared worker.
+    """Circuit breaker for (re)spawning one worker slot.
 
     Each failure doubles the wait before the next attempt (base -> cap); a
     successful transcription resets it. Pure state so it is unit-testable:
@@ -125,7 +144,9 @@ class SpawnBackoff:
 
 
 class WorkerUnavailable(RuntimeError):
-    """Raised at once (never after a wait) while the spawn breaker is open."""
+    """Raised at once (never after a wait) while the spawn breaker is open,
+    and by the pool when no slot can serve or none frees up within
+    REQUEST_TIMEOUT."""
 
 
 def _split_segments(words, max_gap=1.0, max_len=15.0):
@@ -155,36 +176,22 @@ def _emit_segments(transcript_queue, words, offset=0.0):
             transcript_queue.put(AsrResult(text, triples))
 
 
-class _SharedWorker:
-    """Process-wide CrisperWhisper worker shared by every live pod.
+class _StatusSource:
+    """ok/degraded state with listener fan-out; base of a slot and the pool.
 
-    The model is identical and read-only across pods, so one subprocess
-    (one ~4GB GPU copy, one ~7s load) serves them all. Requests are
-    serialized under a lock — the worker is single-threaded anyway, and
-    doing send+readline as one unit keeps the pipe protocol in sync with
-    no request-ID bookkeeping. A dead or unspawnable worker opens the
-    SpawnBackoff breaker: windows are skipped (WorkerUnavailable, raised at
-    once — the lock is never held across a wait) and pods are told ASR is
-    degraded until a window succeeds. After IDLE_SHUTDOWN_SECONDS without a
-    window the worker is shut down to give the GPU memory back; the next
-    window relaunches it transparently.
+    Own lock: listeners are cheap (reactor-marshalled sends) but must never
+    need a worker lock. ``_set_state`` fires the listeners once per change
+    (one message per pod, however many windows fail meanwhile).
     """
 
-    IDLE_SHUTDOWN_SECONDS = 900
-
     def __init__(self):
-        self._lock = threading.Lock()
-        self._proc = None
-        self._last_used = 0.0
-        self._reaper_started = False
-        self.backoff = SpawnBackoff()
-        # Degraded/ok fan-out to live pods. Own lock: listeners are cheap
-        # (reactor-marshalled sends) but must never need the worker lock.
         self._listeners = []
         self._listeners_lock = threading.Lock()
         self._state = ("ok", None)
 
-    # -- status fan-out -----------------------------------------------------
+    @property
+    def state(self):
+        return self._state[0]
 
     def add_listener(self, callback):
         """callback(state, message) on every change; a pod that joins during
@@ -201,32 +208,88 @@ class _SharedWorker:
                 self._listeners.remove(callback)
 
     def _set_state(self, state, message=None):
-        # One WARNING per state change and one message per pod, however many
-        # windows fail while the breaker is open.
         with self._listeners_lock:
             if (state, message) == self._state:
                 return
             changed = state != self._state[0]
             self._state = (state, message)
             listeners = list(self._listeners)
-        if state != "ok":
-            logging.log(logging.WARNING if changed else logging.INFO,
-                        "ASR degraded: %s", message)
-        else:
-            logging.warning("ASR recovered: shared CrisperWhisper worker is serving again")
+        self._log_state(state, message, changed)
         for callback in listeners:
             try:
                 callback(state, message)
             except Exception as e:
                 logging.debug("asr_status listener failed: %s", e)
 
+    def _log_state(self, state, message, changed):
+        pass
+
+
+class _WorkerSlot(_StatusSource):
+    """One persistent CrisperWhisper --serve subprocess: a pool slot.
+
+    The model is identical and read-only across pods, so one subprocess
+    (one ~3-4GB GPU copy, one ~7s load) serves any of them. Requests are
+    serialized under the slot lock — the worker is single-threaded anyway,
+    and doing send+readline as one unit keeps the pipe protocol in sync
+    with no request-ID bookkeeping. A dead or unspawnable worker opens the
+    slot's SpawnBackoff breaker: windows are refused (WorkerUnavailable,
+    raised at once — the lock is never held across a wait) and the pool
+    fails over to another slot or tells the pods ASR is degraded. After
+    IDLE_SHUTDOWN_SECONDS without a window the worker is shut down to give
+    the GPU memory back; the next window relaunches it transparently.
+    With DC_ASR_WORKERS=1 this is exactly the old single shared worker.
+    """
+
+    IDLE_SHUTDOWN_SECONDS = 900
+
+    def __init__(self, index=0):
+        super().__init__()
+        self.index = index
+        self.name = "CrisperWhisper worker %d" % index
+        self.stderr_log = _STDERR_LOG_TEMPLATE % index
+        self._stderr_fh = None
+        self._lock = threading.Lock()
+        self._proc = None
+        self._last_used = 0.0
+        self._reaper_started = False
+        self.backoff = SpawnBackoff()
+
+    @property
+    def alive(self):
+        """A worker process exists (it may have died unnoticed; the next
+        request's _ensure_proc finds out and opens the breaker)."""
+        return self._proc is not None
+
+    def _log_state(self, state, message, changed):
+        # A failure is already WARNed with its cause by _failed().
+        if state == "ok":
+            logging.info("%s: serving again", self.name)
+
+    # -- stderr log ---------------------------------------------------------
+
+    def _stderr_file(self):
+        if self._stderr_fh is None:
+            self._stderr_fh = open(self.stderr_log, "ab", buffering=0)
+        return self._stderr_fh
+
+    def _stderr_tail(self, nbytes=600):
+        """Last lines the worker wrote, for the failure WARNING."""
+        try:
+            with open(self.stderr_log, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                f.seek(max(0, f.tell() - nbytes))
+                return f.read().decode("utf8", "replace").strip()
+        except OSError:
+            return ""
+
     def _failed(self, reason, client_message):
         # Breaker + one WARNING carrying the worker's last stderr lines (a
-        # death finally has a recorded cause) + degraded status to the pods.
+        # death finally has a recorded cause) + degraded status to the pool.
         delay = self.backoff.record_failure(time.time())
-        tail = _stderr_tail()
-        logging.warning("CrisperWhisper worker: %s; next spawn attempt in %.0fs%s",
-                        reason, delay,
+        tail = self._stderr_tail()
+        logging.warning("%s: %s; next spawn attempt in %.0fs%s",
+                        self.name, reason, delay,
                         "\n--- worker stderr tail ---\n" + tail if tail else "")
         self._set_state("degraded", client_message)
 
@@ -251,6 +314,20 @@ class _SharedWorker:
             if ready:
                 return self._proc.stdout.readline()
 
+    def _launch(self):
+        """Popen the --serve worker with its stderr appended to this slot's log."""
+        import config as cf
+        model = cf.crisperwhisper_model()
+        mode = cf.crisperwhisper_mode()
+        logging.info("Starting %s (model=%s, mode=%s)", self.name, model, mode)
+        err = self._stderr_file()
+        err.write(("---- %s spawn model=%s mode=%s ----\n"
+                   % (time.strftime("%Y-%m-%d %H:%M:%S"), model, mode)).encode())
+        return subprocess.Popen(
+            [_worker_python(), _WORKER, "--serve", "--model", model, "--mode", mode],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=err, text=True, bufsize=1)
+
     def _ensure_proc(self):
         if self._proc is not None:
             rc = self._proc.poll()
@@ -258,33 +335,22 @@ class _SharedWorker:
                 return
             # Died between requests (OOM-kill, CUDA fault): same breaker as
             # a failed spawn, so a crash loop can't cost a 7s model load
-            # under the shared lock for every window of every pod.
+            # under the slot lock for every window of every pod.
             self._proc = None
             self._failed("worker exited unexpectedly (rc=%s)" % rc, MSG_RESTARTING)
         now = time.time()
         if not self.backoff.may_attempt(now):
-            raise WorkerUnavailable("restart backoff, %.0fs left"
-                                    % self.backoff.retry_in(now))
+            raise WorkerUnavailable("%s: restart backoff, %.0fs left"
+                                    % (self.name, self.backoff.retry_in(now)))
         free = free_vram_mib()
         if free is not None and free < MIN_FREE_VRAM_MIB:
             self._failed("only %d MiB of GPU memory free (need %d)"
                          % (free, MIN_FREE_VRAM_MIB), MSG_LOW_VRAM)
-            raise WorkerUnavailable("GPU memory low (%d MiB free)" % free)
-        import config as cf
-        model = cf.crisperwhisper_model()
-        mode = cf.crisperwhisper_mode()
-        logging.info("Starting shared CrisperWhisper worker (model=%s, mode=%s)",
-                     model, mode)
+            raise WorkerUnavailable("%s: GPU memory low (%d MiB free)" % (self.name, free))
         ok = False
         try:
-            err = _stderr_file()
-            err.write(("---- %s spawn model=%s mode=%s ----\n"
-                       % (time.strftime("%Y-%m-%d %H:%M:%S"), model, mode)).encode())
-            self._proc = subprocess.Popen(
-                [_worker_python(), _WORKER, "--serve", "--model", model, "--mode", mode],
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=err, text=True, bufsize=1)
-            ready = self._read_reply(timeout=180)
+            self._proc = self._launch()
+            ready = self._read_reply(timeout=SPAWN_TIMEOUT)
             ok = bool(ready) and bool(json.loads(ready).get("ready"))
             reason = "worker exited during model load"
         except Exception as e:
@@ -292,11 +358,12 @@ class _SharedWorker:
         if not ok:
             self._kill()
             self._failed(reason, MSG_RESTARTING)
-            raise WorkerUnavailable(reason)
+            raise WorkerUnavailable("%s: %s" % (self.name, reason))
+        logging.info("%s ready (pid %s)", self.name, getattr(self._proc, "pid", "?"))
         if not self._reaper_started:
             self._reaper_started = True
             threading.Thread(target=self._reap_idle, daemon=True,
-                             name="crisper-idle-reaper").start()
+                             name="crisper-idle-reaper-%d" % self.index).start()
 
     def _kill(self):
         proc, self._proc = self._proc, None
@@ -314,6 +381,7 @@ class _SharedWorker:
             self._proc.stdin.flush()
             self._proc.wait(timeout=5)
             self._proc = None
+            logging.info("%s exited", self.name)
         except Exception:
             self._kill()
 
@@ -323,9 +391,8 @@ class _SharedWorker:
             with self._lock:
                 if (self._proc is not None
                         and time.time() - self._last_used > self.IDLE_SHUTDOWN_SECONDS):
-                    logging.info("Shared CrisperWhisper worker idle >%ds — "
-                                 "shutting down to free GPU memory",
-                                 self.IDLE_SHUTDOWN_SECONDS)
+                    logging.info("%s idle >%ds — shutting down to free GPU memory",
+                                 self.name, self.IDLE_SHUTDOWN_SECONDS)
                     self._shutdown()
 
     # -- API ----------------------------------------------------------------
@@ -350,7 +417,7 @@ class _SharedWorker:
             try:
                 self._proc.stdin.write(json.dumps({"audio": wav_path}) + "\n")
                 self._proc.stdin.flush()
-                line = self._read_reply(timeout=120)
+                line = self._read_reply(timeout=REQUEST_TIMEOUT)
                 if not line:
                     raise RuntimeError("worker closed its pipe")
                 data = json.loads(line)
@@ -366,22 +433,210 @@ class _SharedWorker:
             return data
 
 
-_shared_worker = _SharedWorker()
+class WorkerPool(_StatusSource):
+    """Process-wide pool of live CrisperWhisper worker slots.
+
+    Dispatch: a window takes the lowest free slot that already has a live
+    worker. When every live slot is busy it waits in one FIFO shared by all
+    pods, bounded by ``request_timeout``, so arrival order across pods is
+    honoured and no pod can hog a slot (each pod's flush thread submits one
+    window at a time, so per-pod order is preserved whichever slot serves).
+    Spawning is lazy: slot 0 starts on the first window; a further slot
+    starts only once a window has waited SPAWN_GRACE_SECONDS on busy slots
+    (or when no live slot can take it at all), and every spawn re-checks
+    free VRAM, so a second ~3-4GB worker never lands on a full card. A slot
+    that refuses (breaker open, spawn refused) hands the window to another
+    slot at once; when no slot can serve, WorkerUnavailable is raised
+    without waiting.
+
+    Status: degraded only when every slot is degraded; ok as soon as any
+    slot serves a window. Same add_listener/remove_listener API as before.
+    """
+
+    SPAWN_GRACE_SECONDS = 2.0
+
+    def __init__(self, size=None, slot_factory=None, request_timeout=REQUEST_TIMEOUT,
+                 spawn_grace=None, capacity_wait=CAPACITY_WAIT_SECONDS,
+                 warning_interval=CAPACITY_WARNING_INTERVAL):
+        super().__init__()
+        self.size = pool_size() if size is None else max(1, int(size))
+        factory = slot_factory or _WorkerSlot
+        self.slots = [factory(i) for i in range(self.size)]
+        for slot in self.slots:
+            slot.add_listener(functools.partial(self._slot_changed, slot))
+        self.request_timeout = float(request_timeout)
+        self.spawn_grace = (self.SPAWN_GRACE_SECONDS if spawn_grace is None
+                            else float(spawn_grace))
+        self.capacity_wait = float(capacity_wait)
+        self.warning_interval = float(warning_interval)
+        self._cv = threading.Condition()
+        self._waiters = deque()   # FIFO of tickets; only the head may take a slot
+        self._busy = set()        # slots currently serving (or spawning for) a window
+        self._last_capacity_warning = None
+        self._max_wait = 0.0      # longest FIFO wait since the last DEBUG line
+        self._monitor_started = False
+
+    # -- status -------------------------------------------------------------
+
+    def _slot_changed(self, slot, state, message):
+        if all(s.state != "ok" for s in self.slots):
+            self._set_state("degraded", message)
+        else:
+            self._set_state("ok")
+
+    def _log_state(self, state, message, changed):
+        if state != "ok":
+            logging.log(logging.WARNING if changed else logging.INFO,
+                        "ASR degraded: %s", message)
+        else:
+            logging.warning("ASR recovered: a CrisperWhisper worker is serving again")
+
+    # -- dispatch -----------------------------------------------------------
+
+    @property
+    def waiting(self):
+        return len(self._waiters)
+
+    def _serviceable(self, slot, exclude):
+        # Could this slot (still) serve a window: serving/spawning now, has a
+        # worker, or its breaker allows a spawn attempt.
+        return (slot not in exclude
+                and (slot in self._busy or slot.alive
+                     or slot.backoff.may_attempt(time.time())))
+
+    def _pick(self, exclude, waited):
+        """The slot for the head waiter, or None to keep waiting (caller holds _cv)."""
+        free = [s for s in self.slots if s not in self._busy and s not in exclude]
+        for slot in free:
+            if slot.alive:
+                return slot
+        now = time.time()
+        spawnable = [s for s in free if s.backoff.may_attempt(now)]
+        if not spawnable:
+            return None
+        # Lazy spawn: while a live slot is busy, wait a beat for it rather
+        # than start another ~3-4GB worker for a momentary collision.
+        if waited < self.spawn_grace and any(
+                s not in exclude and (s in self._busy or s.alive) for s in self.slots):
+            return None
+        return spawnable[0]
+
+    def _acquire(self, exclude):
+        ticket = object()
+        t0 = time.monotonic()
+        deadline = t0 + self.request_timeout
+        with self._cv:
+            self._start_monitor()
+            self._waiters.append(ticket)
+            try:
+                while True:
+                    now = time.monotonic()
+                    waited = now - t0
+                    if self._waiters[0] is ticket:
+                        slot = self._pick(exclude, waited)
+                        if slot is not None:
+                            self._busy.add(slot)
+                            self._note_wait(waited)
+                            return slot
+                        if not any(self._serviceable(s, exclude) for s in self.slots):
+                            # Today's contract: refused at once, never after a wait.
+                            raise WorkerUnavailable(
+                                "no CrisperWhisper worker can serve (%d slot%s, breakers open)"
+                                % (self.size, "" if self.size == 1 else "s"))
+                    if now >= deadline:
+                        self._note_wait(waited)
+                        raise WorkerUnavailable(
+                            "no free CrisperWhisper worker within %.0fs (%d windows waiting)"
+                            % (self.request_timeout, len(self._waiters)))
+                    # Short slices: breakers close and the spawn grace elapses
+                    # on the clock, not on a notify.
+                    timeout = min(1.0, deadline - now)
+                    if waited < self.spawn_grace:
+                        timeout = min(timeout, self.spawn_grace - waited)
+                    self._cv.wait(max(0.0, timeout))
+            finally:
+                self._waiters.remove(ticket)
+                self._cv.notify_all()
+
+    def _release(self, slot):
+        with self._cv:
+            self._busy.discard(slot)
+            self._cv.notify_all()
+
+    def _note_wait(self, waited):
+        # Caller holds _cv. The rate-limited WARNING is the load generator's
+        # "capacity reached" signal (CAPACITY_WARNING).
+        self._max_wait = max(self._max_wait, waited)
+        if waited < self.capacity_wait:
+            return
+        now = time.monotonic()
+        if (self._last_capacity_warning is not None
+                and now - self._last_capacity_warning < self.warning_interval):
+            return
+        self._last_capacity_warning = now
+        logging.warning("%s: a window waited %.1fs for a free worker "
+                        "(%d waiting, %d/%d slots busy)",
+                        CAPACITY_WARNING, waited, len(self._waiters),
+                        len(self._busy), self.size)
+
+    def _start_monitor(self):
+        # Caller holds _cv. One DEBUG line a minute with the queue depth.
+        if self._monitor_started:
+            return
+        self._monitor_started = True
+        threading.Thread(target=self._monitor, daemon=True,
+                         name="crisper-pool-monitor").start()
+
+    def _monitor(self):
+        while True:
+            time.sleep(60)
+            with self._cv:
+                waiting, busy, longest = len(self._waiters), len(self._busy), self._max_wait
+                self._max_wait = 0.0
+            alive = sum(1 for s in self.slots if s.alive)
+            logging.debug("CrisperWhisper pool: %d waiting, %d/%d slots busy, %d alive, "
+                          "longest wait %.1fs in the last minute",
+                          waiting, busy, self.size, alive, longest)
+
+    # -- API ----------------------------------------------------------------
+
+    def warm(self):
+        """Preload slot 0 (the others spawn on demand)."""
+        self.slots[0].warm()
+
+    def transcribe(self, wav_path):
+        tried = set()
+        while True:
+            slot = self._acquire(tried)
+            try:
+                return slot.transcribe(wav_path)
+            except WorkerUnavailable:
+                # Refused before any work (breaker open / spawn refused):
+                # another slot may take this same window.
+                tried.add(slot)
+                if len(tried) >= self.size:
+                    raise
+            finally:
+                self._release(slot)
+
+
+_pool = WorkerPool()
 
 
 class CrisperWhisperASR(BaseASR):
-    """Live connector: fixed windows against the shared worker.
+    """Live connector: fixed windows against the worker pool.
 
     Two threads: ``_processing`` only drains the ingest queue and assembles
-    windows (so a slow or locked worker can never stop it draining, which is
+    windows (so a slow or saturated pool can never stop it draining, which is
     what made the reactor's queue fill and evict audio), and ``_transcribing``
-    feeds completed windows to the shared worker. Window start times come
-    from the chunks' absolute sample offsets (asr_ingest), not from how much
-    audio survived the queue, so transcript times match AudioBuffer.
+    feeds completed windows to the pool one at a time, so this pod's windows
+    are transcribed in order whichever slot serves them. Window start times
+    come from the chunks' absolute sample offsets (asr_ingest), not from how
+    much audio survived the queue, so transcript times match AudioBuffer.
     """
 
     WINDOW_SECONDS = 12.0
-    # ~2 min of audio waiting on the worker; beyond that the OLDEST window is
+    # ~2 min of audio waiting on the pool; beyond that the OLDEST window is
     # dropped so captions stay live rather than minutes stale.
     MAX_PENDING_WINDOWS = 10
 
@@ -395,10 +650,10 @@ class CrisperWhisperASR(BaseASR):
 
     def start(self):
         self.running = True
-        _shared_worker.add_listener(self._notify_status)
+        _pool.add_listener(self._notify_status)
         # Warm in the background so joining a pod doesn't block ~7s on the
-        # model load when the shared worker isn't up yet.
-        threading.Thread(target=_shared_worker.warm, daemon=True,
+        # model load when no worker is up yet.
+        threading.Thread(target=_pool.warm, daemon=True,
                          name="crisper-warm").start()
         self.asr_thread = threading.Thread(target=self._processing, name="crisper-asr")
         self.asr_thread.daemon = True
@@ -409,7 +664,7 @@ class CrisperWhisperASR(BaseASR):
 
     def stop(self):
         super().stop()
-        _shared_worker.remove_listener(self._notify_status)
+        _pool.remove_listener(self._notify_status)
 
     def _notify_status(self, state, message):
         callback = self.on_status
@@ -464,14 +719,14 @@ class CrisperWhisperASR(BaseASR):
                 wf.setsampwidth(self.DEPTH)
                 wf.setframerate(self.SAMPLE_RATE)
                 wf.writeframes(pcm)
-            data = _shared_worker.transcribe(tmp.name)
+            data = _pool.transcribe(tmp.name)
             if data.get("error"):
                 logging.warning("CrisperWhisper window failed: %s", data["error"])
             else:
                 _emit_segments(self.transcript_queue, data.get("words", []),
                                offset=start_seconds)
         except WorkerUnavailable as e:
-            # Already WARNed once by the worker; one INFO line per lost window.
+            # Already WARNed once by the slot/pool; one INFO line per lost window.
             logging.info("CrisperWhisper window at %.1fs skipped: %s", start_seconds, e)
         except Exception as e:
             logging.warning("CrisperWhisper transcription failed: %s", e)
