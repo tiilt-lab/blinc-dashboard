@@ -1,0 +1,31 @@
+speaker,start_time_s,text,emotion,rip,frame,listening,team
+Sandy,0.0,Let's start with the document. Section 12 of the contract names Fawn as project manager with authority over site decisions. That's the clause we're relying on.,neutral,right,none,,Sandy
+Pat,18.0,Section 12 gives Fawn authority over site decisions. Section 19 says any change to scope or price must be in writing and signed by an officer of the company. Fawn is not an officer.,neutral,right,none,,Pat
+Riley,35.0,"Fawn's email is in writing. It says 'go ahead with solid oak, price as quoted.' That's a written change.",neutral,right,none,,Sandy
+Jordan,50.0,An email from a project manager isn't a signed change order. Signed by an officer; that's the language. Did anyone on your side ask for a signed order?,neutral,right,past_blame,closed_question,Pat
+Morgan,66.0,"We asked Fawn, who told us she had the authority. We're entitled to rely on the apparent authority of the person you put in charge of the site.",neutral,right,none,,Sandy
+Sam,84.0,So your position is that Fawn's apparent authority substitutes for the signature requirement in Section 19.,neutral,none,none,paraphrase,Pat
+Sandy,96.0,"Yes. And there's precedent. On the Maple Court job, Fawn approved the change to the flooring by email, and Pat paid it without a word. Past practice.",neutral,right,none,,Sandy
+Pat,115.0,"Maple Court was a twelve-thousand-dollar change. This is one point four million. There's no practice of approving seven-figure changes by email, because there's never been one.",neutral,right,none,,Pat
+Riley,132.0,The size of the change isn't in the contract. Section 19 doesn't say 'unless it's big.' Either past practice modifies it or it doesn't.,neutral,right,none,,Sandy
+Jordan,148.0,Why do you think a court would read past practice into a contract that has an explicit no-oral-modification clause?,neutral,right,none,open_question;ask_why,Pat
+Morgan,165.0,Because courts do it all the time when one side has repeatedly waived the clause. That's the whole doctrine of waiver by conduct.,neutral,right,none,,Sandy
+Sam,180.0,Once. One twelve-thousand-dollar change. That's not 'repeatedly.',neutral,right,none,,Pat
+Sandy,194.0,"Fine, then let's talk about what Fawn actually is. Your letterhead, your title, your email domain. Any reasonable contractor would take her instruction as yours.",neutral,right,none,,Sandy
+Pat,212.0,And any reasonable contractor doing one point four million of work would get a signature. You've read Section 19; you initialled every page.,escalating,right,past_blame,,Pat
+Riley,230.0,We did initial it. We also watched your project manager change the spec in front of us and tell us to proceed. Is your position that she was lying to us?,escalating,right,past_blame,closed_question,Sandy
+Jordan,246.0,"Nobody's saying she lied. She exceeded her authority. Those are different things, and the contract only cares about the second.",neutral,right,past_blame,,Pat
+Morgan,262.0,"Can I ask what you think Section 12 is for, then? If the project manager can't approve changes, what site decisions does she have authority over?",neutral,right,none,open_question,Sandy
+Sam,280.0,"Sequencing, staffing, inspections, the things Section 12 lists. Not price. Not scope.",neutral,right,none,,Pat
+Sandy,295.0,"So the moment a decision touches money, Fawn's authority evaporates. Is that what you're telling me?",neutral,none,none,paraphrase;check_understanding,Sandy
+Pat,310.0,"The moment a decision changes scope or price beyond the signed contract, yes. Section 19.",neutral,right,none,,Pat
+Riley,325.0,Then you'd better explain why the bank's inspection report from July lists 'solid oak per revised spec' and you signed off on the draw request that quoted it.,escalating,right,past_blame,,Sandy
+Jordan,342.0,"Signing a draw request for the bank isn't signing a change order. It's a different document, for a different party, for a different purpose.",neutral,right,none,,Pat
+Morgan,358.0,It's an officer of the company putting a signature under the words 'solid oak per revised spec.' A court is going to read that as ratification.,neutral,right,none,,Sandy
+Sam,375.0,Or as a payment draw signed on the assumption that the contract hadn't changed. Which is what a court will conclude when it reads Section 19.,neutral,right,none,,Pat
+Sandy,392.0,Let me make sure I've got your whole argument: Section 19 requires an officer's signature; Fawn isn't one; Maple Court was too small to count as practice; and the draw request isn't ratification. Is that the complete position?,neutral,none,none,summarize;check_understanding,Sandy
+Pat,410.0,"That's it, yes.",neutral,none,none,,Pat
+Riley,424.0,"Then we're at an impasse, because ours is that apparent authority plus your ratification makes the amendment binding, and no court in this state has held otherwise.",neutral,right,none,,Sandy
+Jordan,440.0,"Would you be willing to put both positions to a neutral, a mediator or an arbitrator, before anyone files?",defusing,right,future_problem_solving,closed_question,Pat
+Sandy,458.0,"An arbitrator takes six months. Our answer is no, unless the disputed amount goes into escrow in the meantime, which is what the contract's dispute clause requires anyway.",neutral,right,future_problem_solving,,Sandy
+Pat,476.0,"We're not putting one point four into escrow on a change order we say is invalid. So I think we're done for today; you'll hear from our lawyer, and I expect we'll hear from yours.",escalating,right,none,,Pat

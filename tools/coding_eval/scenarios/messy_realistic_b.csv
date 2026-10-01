@@ -1,0 +1,35 @@
+speaker,start_time_s,text,emotion,rip,frame,listening,team
+Sandy,0.0,"Okay so, um. Should we just, do you want to start, or?",neutral,none,none,closed_question,Sandy
+Pat,4.0,Go ahead. You called the meeting.,neutral,none,none,,Pat
+Sandy,8.0,"Right. Yeah. So the, the bill. One point four. We need it paid.",neutral,none,none,,Sandy
+Jordan,15.0,Mm-hm.,neutral,none,none,,Pat
+Sandy,17.0,"And I know you've got the, whatever, the Section 19 thing, but Fawn said go, so.",neutral,right,none,,Sandy
+Sam,24.0,Fawn said go. Right.,escalating,none,none,,Pat
+Riley,27.0,"She did, though. I was there. She looked at the sample and said solid oak, all three floors, go.",neutral,right,past_blame,,Sandy
+Pat,36.0,Nobody's saying she didn't say it.,neutral,none,none,,Pat
+Sandy,40.0,Then what are we...,neutral,none,none,,Sandy
+Jordan,42.0,What we're saying is that she couldn't. Say it. Not for one point four.,escalating,right,none,interrupt,Pat
+Morgan,48.0,"Okay but she did, so, like, we're past that? We built it. It's in the building. Are you going to take it out?",neutral,right,none,,Sandy
+Sam,56.0,Ha. No.,neutral,none,none,,Pat
+Pat,58.0,"Look, can we, let's do the numbers. Jordan, you have the sheet?",neutral,none,none,,Pat
+Jordan,62.0,"Yeah. Okay. Original contract, nine hundred and twenty. Change order, plus four eighty, so one point four. Paid to date, six-ten. Retainage held, forty-six. So open on the original is, two sixty-four, and open with the change is, seven twenty... no, wait. Sorry. Hold on.",neutral,none,none,,Pat
+Sam,80.0,Seven forty-four.,neutral,none,none,,Pat
+Jordan,82.0,"Seven forty-four. Thank you. So the gap between us is the four eighty on the change, basically.",neutral,none,none,,Pat
+Riley,88.0,Plus the retainage you're sitting on.,neutral,none,none,,Sandy
+Jordan,91.0,"Plus retainage, sure, that releases at completion; that's not in dispute.",neutral,right,none,,Pat
+Sandy,96.0,"So is there, I mean, is there a world where you pay it? Any of it? Or are we just, is this a meeting about a meeting.",neutral,none,none,closed_question,Sandy
+Pat,106.0,"There's a world. There's a world where we pay some of it, on a schedule, and the change order gets torn up so it's not a precedent. That's the world.",defusing,interest,future_problem_solving,,Pat
+Morgan,116.0,Some of it.,neutral,none,none,,Sandy
+Pat,118.0,Some of it.,neutral,none,none,,Pat
+Riley,120.0,Define some.,neutral,none,none,,Sandy
+Sam,122.0,"Two hundred now. Then we sit down with the supplier invoice and see what the oak actually cost you, and we go from there.",defusing,interest,future_problem_solving,,Pat
+Sandy,132.0,Two hundred is the loan. You're offering me my own loan.,neutral,none,none,,Sandy
+Jordan,138.0,"It's not the... okay, that's, no, it's not the loan, it's a payment against the invoice; the loan's separate. We can talk about netting it, but that's separate.",neutral,none,none,,Pat
+Morgan,148.0,"Can we not do the netting thing, because every time the netting comes up we lose twenty minutes.",neutral,none,none,closed_question,Sandy
+Riley,153.0,"Ha, yeah.",neutral,none,none,,Sandy
+Pat,155.0,"Fair. Parking the loan. So, two hundred now and then a real look at the oak cost: is that something you can take back to your people, or is it dead on arrival?",neutral,none,future_problem_solving,closed_question,Pat
+Sandy,165.0,"It's not dead. It's not alive either. Two hundred doesn't get the supplier off my back, and that's, honestly that's the whole thing, the supplier.",neutral,interest,none,,Sandy
+Sam,175.0,"What does get him off your back? Like, what's the actual number he'd take on the fifteenth?",neutral,interest,none,open_question;ask_constraint,Pat
+Riley,182.0,"He said one point one. He said it in an email, I can show you, it's, hang on.",neutral,interest,none,,Sandy
+Morgan,187.0,It's in the folder. The blue one.,neutral,none,none,,Sandy
+Pat,190.0,"Okay. One point one. Well, that's a different conversation than two hundred, but at least now it's a real one. Let's take ten and I'll call the bank.",defusing,none,future_problem_solving,,Pat

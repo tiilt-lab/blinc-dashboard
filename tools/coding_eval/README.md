@@ -40,7 +40,8 @@ One row per utterance, in transcript order, UTF-8, header row required:
 | `text` | yes | the utterance; rows with empty text are skipped |
 | `emotion`, `rip`, `frame` | yes | exactly one codebook label each (case-insensitive; spaces/hyphens accepted, e.g. `past blame`) |
 | `listening` | yes (may be empty) | zero or more labels separated by `;` (`open_question;ask_why`). Empty means "no listening move", which is the right code for most statements |
-| `team` | no | if present, utterances are chunked per team so one prompt never mixes two conversations |
+| `team` | no | the speaker's side, `Pat` or `Sandy`, for the per-team roll-up in the review workbook; it never splits the transcript |
+| `session` | no | one conversation per value; if present, utterances are chunked per session so one prompt never mixes two pods |
 
 Any label outside the codebook is an error (line number reported), so typos
 in hand codes cannot silently become disagreements.
@@ -57,6 +58,28 @@ share them, so settle them with Professor Wang before reading her numbers:
   codes only the content label.
 - `check_understanding` ("have I got that right?") replaces `closed_question`.
 - `interrupt` goes on the utterance that cuts in, not the one cut off.
+
+## Scenarios (`scenarios/*.csv`)
+
+Twelve scripted Viking negotiations, 30 to 36 lines each, two scripts (`_a`,
+`_b`) for each of six situations, hand-coded by the BLINC team against
+codebook `viking-v2`. Each has both teams (Pat / Jordan / Sam vs Sandy /
+Riley / Morgan) with `team` set per speaker:
+
+| situation | what it tests |
+|---|---|
+| `instructed_anger` | one side plays angry for the first ten minutes, the other de-escalates; escalation recall, first sustained de-escalation |
+| `rights_debate` | thirty lines of contract clauses and precedent that never reach interests; `right` vs `none`, `past_blame` on dry rebuttals |
+| `power_spiral` | threats and counter-threats, a wise (if/then) threat, a late rescue; `power`, calm threats as `escalating` |
+| `interest_based` | a well-run talk: brief rights, then interests, many listening moves, three packages, a deal; `interest`, `defusing` on proposals and summaries |
+| `messy_realistic` | fragments, overlaps, jokes, numbers read aloud, side comments; what classroom speech looks like |
+| `mixed_team_dynamics` | one teammate blames while another steers; within-team asides, `interrupt` of a teammate |
+
+`run_all.py` codes every scenario (and `sample.csv`), writes
+`results/<stem>.json` for each and prints one table with a pooled row;
+`build_review_xlsx.py` turns those results into the reviewer workbook for
+Professor Wang (one sheet per scenario, agreement summary, conventions to
+settle, a hand-coding template with dropdowns).
 
 ## Running it on the server
 

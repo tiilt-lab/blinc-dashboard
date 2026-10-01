@@ -107,7 +107,7 @@ def test_load_gold_parses_codes_and_empty_listening(tmp_path):
     assert rows[1]["gold"]["listening"] == ["open_question", "ask_why"]   # trimmed, codebook order
     assert rows[1]["gold"]["emotion"] == "neutral"                        # case-insensitive
     assert rows[2]["gold"]["frame"] == "future_problem_solving"           # spaces / hyphens accepted
-    assert rows[0]["team"] == ""                                          # team column optional
+    assert rows[0]["team"] == "" and rows[0]["session"] == ""             # team / session optional
 
 
 def test_load_gold_rejects_bad_codes_and_missing_columns(tmp_path):
@@ -153,13 +153,17 @@ def test_adapter_refuses_to_run_without_the_engine(tmp_path):
         adapter._load_engine(str(tmp_path / "nope.py"))
 
 
-def test_chunks_carry_uncoded_context_and_stay_within_team():
-    utts = [dict(_u(i), team="A" if i < 5 else "B") for i in range(8)]
+def test_chunks_carry_uncoded_context_and_stay_within_session():
+    # `session` separates conversations; `team` is the speaker's side and must
+    # never split a transcript (the model has to see both sides to code either).
+    utts = [dict(_u(i), session="A" if i < 5 else "B", team="Pat" if i % 2 else "Sandy") for i in range(8)]
     plan = cli.plan_chunks(utts, size=3, context=2)
     assert [(t, [u["index"] for u in ctx], [u["index"] for u in ch]) for t, ctx, ch in plan] == [
         ("A", [], [0, 1, 2]), ("A", [1, 2], [3, 4]),
         ("B", [], [5, 6, 7]),
     ]
+    one = [dict(_u(i), team="Pat" if i % 2 else "Sandy") for i in range(4)]    # no session column
+    assert [(t, [u["index"] for u in ch]) for t, _, ch in cli.plan_chunks(one, size=10, context=2)] == [("", [0, 1, 2, 3])]
     with pytest.raises(ValueError):
         adapter.chunk_utterances(utts, 0, 1)
 

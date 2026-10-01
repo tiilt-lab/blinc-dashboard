@@ -1,0 +1,37 @@
+speaker,start_time_s,text,emotion,rip,frame,listening,team
+Pat,0.0,"Let's start with where we can get to today, not where we've been. What would a good outcome look like for you by the end of this hour?",defusing,interest,future_problem_solving,open_question,Pat
+Riley,12.0,"A good outcome is a cheque. One point four, cleared, and an apology for making us chase it.",escalating,none,none,,Sandy
+Sandy,22.0,What Riley means is that the invoice is the priority. But we're open on how it gets paid.,defusing,interest,none,,Sandy
+Jordan,32.0,"Open on how. That's generous, considering your side changed the spec without a signed order and then billed us for it.",escalating,right,past_blame,,Pat
+Pat,44.0,Jordan. Let's not.,defusing,none,none,,Pat
+Riley,48.0,"No, let Jordan talk. I want to hear how a project manager on your letterhead 'changed the spec without authority'. Go on.",escalating,right,past_blame,,Sandy
+Sam,60.0,"Can I just get a number straight before we go further? The invoice is one point four; the original contract was nine twenty; so the change is four eighty, not five hundred as it says on your summary sheet.",neutral,none,none,closed_question,Pat
+Morgan,74.0,"Sorry, yes, that sheet's wrong; it's four eighty. My typo.",neutral,none,none,,Sandy
+Sandy,79.0,"Four eighty. Thank you, Sam. So the dispute is really about the four eighty, and the other nine twenty isn't in question. Is that right?",neutral,none,none,paraphrase;check_understanding,Sandy
+Jordan,90.0,The nine twenty was never in question. We've paid six ten of it. It's the four eighty that your foreman decided to spend on our behalf.,escalating,right,past_blame,,Pat
+Riley,100.0,Our foreman spent it because your project manager told him to. In writing. Which your side keeps forgetting.,escalating,right,past_blame,,Sandy
+Pat,110.0,"Nobody's forgetting. Let me try something. Suppose, just suppose, the four eighty is paid in full. What would need to happen between now and day fifteen for that to actually solve your problem?",defusing,interest,future_problem_solving,open_question;ask_constraint,Pat
+Sandy,125.0,The supplier gets one point one on day fifteen. That's the only date that matters; everything else can breathe.,neutral,interest,none,,Sandy
+Riley,132.0,"And the loan gets dealt with, and the rent, because otherwise you've just moved the bankruptcy from March to June.",neutral,interest,none,,Sandy
+Sam,142.0,"Hang on, the loan is two hundred principal plus ten percent from January, so about two-ten by day fifteen, not two hundred. Just so we're using the right number.",neutral,none,none,,Pat
+Morgan,152.0,"Two-ten, noted.",neutral,none,none,,Sandy
+Jordan,156.0,"Two-ten that you haven't made a payment on since the spring, by the way. So let's not talk about who's been generous with whom.",escalating,right,past_blame,,Pat
+Pat,168.0,"Jordan, that's not going to get us there.",defusing,none,none,,Pat
+Sandy,172.0,"I appreciate that, Pat. And Jordan's not wrong that the loan's been quiet. It's been quiet because every dollar went into the oak.",defusing,interest,none,acknowledge,Sandy
+Riley,185.0,Which they ordered.,escalating,right,past_blame,,Sandy
+Morgan,188.0,"Can I suggest we take five minutes? I need to catch up on the notes, and I think we're going in a circle on who ordered what.",defusing,none,none,closed_question,Sandy
+Pat,198.0,Good idea. Five minutes.,defusing,none,none,,Pat
+Sandy,500.0,"Okay. While we were out, Morgan and I talked. We can live with the four eighty being paid over time if the supplier's covered on day fifteen. That's the shape we'd take back.",defusing,interest,future_problem_solving,,Sandy
+Riley,515.0,I didn't agree to 'over time'.,neutral,none,none,,Sandy
+Sandy,518.0,"You didn't. I'm saying it anyway, because it's the only version where we're still in business in April.",neutral,interest,none,,Sandy
+Sam,528.0,"So that we're precise: 'the supplier covered' means one point one cleared on day fifteen, and 'over time' means the remaining three hundred on a schedule. Have I got the two numbers right?",defusing,none,future_problem_solving,paraphrase;check_understanding,Pat
+Morgan,540.0,"Yes. Three hundred, not three-twenty; I've corrected it in the notes.",neutral,none,future_problem_solving,,Sandy
+Jordan,546.0,"Three hundred over what schedule? Because if it's twelve months, that's a loan to you, on top of the loan we already made and you're not paying.",escalating,right,past_blame,closed_question,Pat
+Pat,558.0,"Let's answer the schedule question and leave the loan for a second. What schedule works for you, and what does it need to be for us? Sam, what can we carry?",defusing,interest,future_problem_solving,open_question,Pat
+Sam,570.0,"Six months at fifty a month is fine. Twelve months at twenty-five is fine if the lakefront closes; if it doesn't, twelve is tight.",neutral,interest,future_problem_solving,,Pat
+Sandy,582.0,"Six months works for us. Fifty a month, starting day forty-five, so the first one lands after the supplier's cleared.",defusing,interest,future_problem_solving,,Sandy
+Riley,594.0,And the loan? Since Jordan keeps bringing it up.,neutral,none,future_problem_solving,open_question,Sandy
+Jordan,600.0,"The loan gets repaid when the house sells, which you've said you're doing anyway, and the interest stops accruing on signing. That's me being generous, for the record.",defusing,interest,future_problem_solving,,Pat
+Morgan,614.0,"Noted, for the record.",neutral,none,none,,Sandy
+Sandy,617.0,"Then we have it: one point one to the supplier on day fifteen, three hundred at fifty a month from day forty-five, the loan repaid from the house sale with interest frozen at signing, and the rent stays as it is. Pat, is that how you'd write it?",defusing,none,future_problem_solving,summarize;check_understanding,Sandy
+Pat,632.0,"That's how I'd write it. Sam, get it down before Jordan thinks of something else.",neutral,none,future_problem_solving,,Pat

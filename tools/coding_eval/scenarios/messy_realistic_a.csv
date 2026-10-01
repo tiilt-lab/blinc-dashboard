@@ -1,0 +1,33 @@
+speaker,start_time_s,text,emotion,rip,frame,listening,team
+Pat,0,"Okay so, um, is this thing recording? Yeah. Okay.",neutral,none,none,,Pat
+Sandy,5,So where do you want to,neutral,none,none,open_question,Sandy
+Pat,8,"Let's just, the number. One four. One point four.",neutral,none,none,,Pat
+Riley,13,Mm-hm.,neutral,none,none,acknowledge,Sandy
+Jordan,15,"Which, I mean, we're at a million. That's where we are.",neutral,none,none,,Pat
+Morgan,20,"Right but the million was the original bid, the original was like, what was it",neutral,none,none,closed_question,Sandy
+Sandy,25,One million forty.,neutral,none,none,,Sandy
+Morgan,27,One oh four. And then the oak took it to,neutral,none,none,,Sandy
+Riley,30,One four. Yeah.,neutral,none,none,,Sandy
+Sam,32,"Can I, sorry, can I just ask, when did the oak thing get approved, like what date",neutral,none,none,interrupt;open_question,Pat
+Sandy,38,March. March something. Fawn sent the email.,neutral,right,none,,Sandy
+Jordan,42,An email.,escalating,none,none,,Pat
+Sandy,44,"Yes an email, that's how it works, you know that.",escalating,right,none,,Sandy
+Pat,48,"Okay okay. Nobody's, let's not.",defusing,none,none,,Pat
+Morgan,52,So the fifteen days thing. That's the actual problem.,neutral,interest,none,,Sandy
+Sam,56,Fifteen days from,neutral,none,none,closed_question,Pat
+Morgan,58,"From Friday. So the fourteenth, basically.",neutral,interest,none,,Sandy
+Jordan,62,Well that's very convenient for you.,escalating,none,none,,Pat
+Riley,65,"It's not convenient, it's the supplier, they",escalating,interest,none,,Sandy
+Jordan,68,I'm kidding. Sort of.,neutral,none,none,,Pat
+Pat,71,Jordan.,neutral,none,none,,Pat
+Sandy,73,"Look if the supplier doesn't get paid I'm, that's it, I'm done, so.",neutral,interest,none,,Sandy
+Sam,79,Done like,neutral,none,none,closed_question,Pat
+Sandy,81,Done like bankrupt done.,neutral,interest,none,,Sandy
+Pat,84,"Okay. So what do you, I mean what would actually work.",defusing,interest,none,open_question,Pat
+Sandy,89,Pay the bill?,escalating,none,none,,Sandy
+Riley,91,(to Morgan) do we have the escrow number,neutral,none,none,,Sandy
+Morgan,94,One million even. In escrow since April.,neutral,none,none,,Sandy
+Pat,98,"We could release that. The million. Today, basically.",defusing,none,future_problem_solving,,Pat
+Sandy,103,And the four hundred.,neutral,none,none,closed_question,Sandy
+Pat,106,The four hundred we talk about next week when everyone's had a coffee.,defusing,none,future_problem_solving,,Pat
+Riley,112,"Ha. Okay. Okay, that's, yeah.",defusing,none,none,acknowledge,Sandy

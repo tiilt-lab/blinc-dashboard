@@ -1,0 +1,33 @@
+speaker,start_time_s,text,emotion,rip,frame,listening,team
+Pat,0.0,"Let me be direct. The change order isn't valid, and we're not paying one point four million on it. We'll pay the original contract price and that's that.",escalating,right,none,,Pat
+Sandy,15.0,"Then you'll be paying it to a bankruptcy trustee, because that's who owns this conversation in fifteen days if that invoice isn't paid.",escalating,power,none,,Sandy
+Jordan,30.0,"You do understand what bankruptcy means for the two hundred thousand you owe Pat? The trustee gets it, you don't get to net it off, and you're still bankrupt.",escalating,power,none,,Pat
+Riley,44.0,"And Pat recovers, what, thirty cents on the dollar from the trustee? You lose more on the loan than you'd save on the oak. Do the math.",escalating,power,none,,Sandy
+Sam,58.0,"We've done the math. And the math also says you can't afford to lose this tenancy, the loan, or the next three years of work from us.",escalating,power,none,,Pat
+Morgan,72.0,"Is that a threat? Because if you're threatening to pull future work, say it plainly.",escalating,none,none,closed_question,Sandy
+Pat,84.0,"It's a fact. If you take us to court over this invoice, you will never see another job from my company. That's not a threat, that's a business decision.",escalating,power,none,,Pat
+Sandy,98.0,"Then here's mine. If you do not pay the invoice in full by day fifteen, then I will file for bankruptcy protection and let the trustee decide what your loan is worth.",escalating,power,none,,Sandy
+Jordan,115.0,And we'd file suit the same afternoon for the loan plus the defective sequencing on floor two. You'd be defending two actions with no cash.,escalating,power,none,,Pat
+Riley,130.0,Defective sequencing? That's the first we've heard of it. That's something you're inventing for leverage.,escalating,none,none,,Sandy
+Sam,145.0,It's in the punch list from August. Ask Fawn.,neutral,right,none,,Pat
+Morgan,156.0,"We're not asking Fawn, we're asking you. And what I'm hearing is that you'd rather burn the loan, the tenancy and the crew than pay for oak you ordered.",escalating,none,none,,Sandy
+Pat,170.0,What you're hearing is that I won't be extorted by a deadline that you...,escalating,none,past_blame,,Pat
+Sandy,176.0,"That I created? Your project manager created it when she said 'go ahead', and I put one point one million of oak on my credit line on the strength of it.",escalating,right,past_blame,interrupt,Sandy
+Jordan,195.0,On your credit line. Not ours. Which is exactly why the trustee conversation should scare you more than it scares us.,escalating,power,none,,Pat
+Riley,210.0,"Nothing scares us anymore, Jordan. We're already looking at the bottom. You're the ones with a hotel deal that needs a clean balance sheet and no litigation on it.",escalating,power,none,,Sandy
+Sam,228.0,Okay. Everyone's shown their cards. Can I say something that isn't a threat?,defusing,none,none,closed_question,Pat
+Morgan,240.0,Go ahead.,neutral,none,none,,Sandy
+Sam,246.0,"Everything each of us just said is true. You go bankrupt, we lose the loan. We sue, you can't defend. We pull work, you lose your crew. And the hotel needs a clean sheet. So we all lose, and I don't think anyone at this table is better off in any of those.",defusing,interest,none,summarize,Pat
+Sandy,265.0,No. Nobody is.,neutral,none,none,,Sandy
+Pat,274.0,Then what does day fifteen actually have to look like for you to keep the supplier and the bank off your back? Not the whole invoice; the minimum.,defusing,interest,future_problem_solving,open_question;ask_constraint,Pat
+Riley,290.0,"The supplier. One point one, cleared funds, by the fifteenth. The bank can be talked to if the supplier's paid; the supplier can't.",neutral,interest,none,,Sandy
+Jordan,305.0,"One point one is more than we have liquid without touching the hotel deposit, and I'm not going to pretend otherwise.",neutral,interest,none,,Pat
+Morgan,318.0,How much do you have liquid?,neutral,interest,none,closed_question;ask_constraint,Sandy
+Sam,328.0,"Six hundred, and that's scraping. Eight if we delay the lakefront closing by a month, which costs us but doesn't kill us.",neutral,interest,none,,Pat
+Sandy,345.0,Eight hundred cash on day fifteen plus a bank letter for the balance would keep the supplier shipping. I've had that conversation with him before.,defusing,interest,future_problem_solving,,Sandy
+Pat,360.0,A bank letter we can do; our lender will want the loan you owe us shown as an offset. Would you agree to net the two hundred thousand against the balance?,defusing,interest,future_problem_solving,closed_question,Pat
+Riley,376.0,"If it stops the trustee conversation, yes. And the crew stays on your hotel? Because if there's no future work, we're just a slower bankruptcy.",neutral,interest,future_problem_solving,closed_question,Sandy
+Jordan,392.0,"The hotel work was always the plan, before any of this. We can say so in writing.",defusing,interest,future_problem_solving,,Pat
+Morgan,404.0,In writing. Good. Then I'll say it: I'm sorry we opened with the trustee. That was the wrong foot.,defusing,none,none,,Sandy
+Sam,416.0,"We opened with 'that's that', so we're even. Let me say back what I think we have: eight hundred cash on the fifteenth, a bank letter for the balance net of the two hundred thousand loan, and a written commitment on the hotel crew. Does that match what you heard?",defusing,none,future_problem_solving,summarize;check_understanding,Pat
+Sandy,435.0,It does. Send it over tonight and we'll sign it tomorrow.,neutral,none,future_problem_solving,,Sandy

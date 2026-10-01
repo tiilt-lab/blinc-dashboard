@@ -7,8 +7,10 @@
     ... --out results/<ts>.json   (default: tools/coding_eval/results/<ts>.json; "" to skip)
 
 Gold CSV columns: speaker, start_time_s, text, emotion, rip, frame,
-listening (semicolon-separated, may be empty), optional team. Rows are coded
-in file order, chunked per team the way the engine chunks a transcript.
+listening (semicolon-separated, may be empty), optional team (the speaker's
+side, Pat or Sandy, for the per-team rollup) and optional session (one
+conversation per value; rows are coded in file order and chunked per session
+the way the engine chunks a transcript, so one prompt never mixes two pods).
 Prompt, chunking, LLM call and parsing come from the engine through
 adapter.py. See README.md for the metrics.
 """
@@ -53,6 +55,7 @@ def load_gold(path):
                 "start_time_s": _time(row.get("start_time_s"), lineno),
                 "text": text,
                 "team": (row.get("team") or "").strip(),
+                "session": (row.get("session") or "").strip(),
                 "gold": {},
             }
             for dim in adapter.SINGLE_LABEL:
@@ -88,29 +91,33 @@ def _time(raw, lineno):
 
 
 def plan_chunks(utts, size, context):
-    """(team, context, to_code) triples, per team in order of first appearance."""
-    teams = []
-    by_team = {}
+    """(session, context, to_code) triples, per session (conversation) in
+    order of first appearance; a file without a session column is one
+    conversation. The team column is the speaker's side and never splits
+    the transcript: the model must see both sides to code either."""
+    sessions = []
+    by_session = {}
     for u in utts:
-        by_team.setdefault(u["team"], []) or teams.append(u["team"])
-        by_team[u["team"]].append(u)
+        key = u.get("session") or ""
+        by_session.setdefault(key, []) or sessions.append(key)
+        by_session[key].append(u)
     plan = []
-    for team in teams:
-        for ctx, chunk in adapter.chunk_utterances(by_team[team], size, context):
-            plan.append((team, ctx, chunk))
+    for session in sessions:
+        for ctx, chunk in adapter.chunk_utterances(by_session[session], size, context):
+            plan.append((session, ctx, chunk))
     return plan
 
 
 def run_model(plan, url, model, timeout, log=sys.stderr):
     """Code every chunk; returns (codes by utterance index, raw replies, warnings)."""
     codes, raw, warnings = {}, [], []
-    for k, (team, ctx, chunk) in enumerate(plan, 1):
+    for k, (session, ctx, chunk) in enumerate(plan, 1):
         msgs = adapter.build_messages(chunk, ctx)
         print("chunk %d/%d: %d utterances%s ..." % (
-            k, len(plan), len(chunk), (" (team %s)" % team) if team else ""), file=log, flush=True)
+            k, len(plan), len(chunk), (" (session %s)" % session) if session else ""), file=log, flush=True)
         text = adapter.call_llm(msgs, url=url, model=model, timeout=timeout)
         parsed, warns = adapter.parse_codes(text, chunk)
-        raw.append({"chunk": k, "team": team, "reply": text, "warnings": warns})
+        raw.append({"chunk": k, "session": session, "reply": text, "warnings": warns})
         warnings.extend("chunk %d: %s" % (k, w) for w in warns)
         for u, c in zip(chunk, parsed):
             codes[u["index"]] = c
@@ -200,12 +207,12 @@ def main(argv=None):
     if args.dry_run:
         print("# dry run: %d utterance(s), %d chunk(s); would POST to %s model %s" % (
             len(utts), len(plan), args.llm_url, args.model))
-        for k, (team, ctx, chunk) in enumerate(plan, 1):
+        for k, (session, ctx, chunk) in enumerate(plan, 1):
             msgs = adapter.build_messages(chunk, ctx)
             body = adapter.request_body(msgs, args.model)
             settings = {k2: v for k2, v in body.items() if k2 != "messages"}
             print("\n### chunk %d/%d%s  request settings: %s" % (
-                k, len(plan), (" team=%s" % team) if team else "", json.dumps(settings)))
+                k, len(plan), (" session=%s" % session) if session else "", json.dumps(settings)))
             for m in msgs:
                 print("--- %s ---" % m["role"])
                 print(m["content"])
@@ -235,7 +242,8 @@ def main(argv=None):
             "metrics": per_dim,
             "disagreements": disagreements,
             "utterances": [{"index": u["index"], "speaker": u["speaker_tag"], "start_time_s": u["start_time_s"],
-                            "text": u["text"], "team": u["team"], "gold": u["gold"], "model": codes[u["index"]]}
+                            "text": u["text"], "team": u["team"], "session": u["session"],
+                            "gold": u["gold"], "model": codes[u["index"]]}
                            for u in utts],
             "raw": raw,
             "warnings": warnings,

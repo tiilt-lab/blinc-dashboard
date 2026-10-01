@@ -1,0 +1,32 @@
+speaker,start_time_s,text,emotion,rip,frame,listening,team
+Pat,0,Thanks for sitting down with us. Where would you like to start?,neutral,none,none,open_question,Pat
+Sandy,8,Start? You can start by explaining why you are refusing to pay a bill for work you signed off on.,escalating,right,past_blame,,Sandy
+Riley,18,"This is completely unreasonable. We did the work, the oak is in the building, and now you want a discount.",escalating,none,past_blame,,Sandy
+Pat,27,I understand this is frustrating. The amended bill is four hundred thousand over what we agreed.,defusing,right,none,acknowledge,Pat
+Morgan,36,You agreed to it. Fawn approved the upgrade on your behalf like she has on every job for six years.,escalating,right,past_blame,,Sandy
+Jordan,46,Fawn was never authorized to approve a change of that size.,neutral,right,none,,Pat
+Sandy,53,Don't lecture us about authorization. You took a two-week vacation and left her running your business.,escalating,none,past_blame,interrupt,Sandy
+Riley,62,And then you come back and act like none of it happened. That is not how honest people operate.,escalating,none,past_blame,,Sandy
+Sam,72,"I can see that you're angry, and I'm sorry we're in this situation. Tell me what's on your mind.",defusing,none,none,acknowledge;open_question,Pat
+Sandy,82,What's on my mind is a one point four million dollar bill for oak that I have to pay in fifteen days.,escalating,interest,none,,Sandy
+Morgan,93,And a landlord who wants us bankrupt so he can keep the deposit and the space.,escalating,none,past_blame,,Sandy
+Pat,103,Nobody at this table wants you bankrupt. Help me understand the fifteen days.,defusing,interest,none,open_question;ask_constraint,Pat
+Sandy,112,"If the supplier isn't paid in fifteen days they stop shipping to every job I have. That's the business, gone.",neutral,interest,none,,Sandy
+Riley,123,Which you knew when you decided to stall on the invoice.,escalating,none,past_blame,,Sandy
+Jordan,131,We did not stall. We disputed four hundred thousand that was never in writing.,escalating,right,past_blame,,Pat
+Sam,140,Can we take two minutes? I think everyone could use a breather.,defusing,none,none,closed_question,Pat
+Sandy,180,Fine. We're back. Say what you were going to say.,neutral,none,none,,Sandy
+Pat,188,"What I hear is that the supplier deadline is the real problem, more than the total. Is that right?",defusing,interest,none,paraphrase;check_understanding,Pat
+Sandy,198,"Yes. If the supplier is paid, I can survive a fight about the rest.",neutral,interest,none,,Sandy
+Morgan,206,And we'd rather not fight at all. We want to keep working with you.,defusing,interest,none,,Sandy
+Pat,214,Then let's talk about what has to happen in the next fifteen days.,defusing,interest,future_problem_solving,ask_constraint,Pat
+Jordan,222,We can release the one million we never disputed this week. The four hundred is the open question.,defusing,none,future_problem_solving,,Pat
+Riley,232,That gets the supplier paid. Why can't you release all of it?,neutral,none,none,ask_why,Sandy
+Sam,240,Because the bank pulled our credit line last month. We are cash-tight for the quarter.,neutral,interest,none,,Pat
+Sandy,250,I didn't know that.,neutral,none,none,acknowledge,Sandy
+Morgan,255,What if the remaining four hundred came out of future work instead of cash?,defusing,interest,future_problem_solving,open_question,Sandy
+Pat,264,We have two projects starting in the spring. We could commit Sandy's crew to both.,defusing,interest,future_problem_solving,,Pat
+Sandy,274,And the rent? I'm two months behind on the space.,neutral,interest,none,closed_question,Sandy
+Jordan,282,Fold it into the same schedule. Nothing due until the first spring project pays.,defusing,none,future_problem_solving,,Pat
+Riley,291,"So: one million this week, four hundred against spring work, rent deferred. Did I get that right?",defusing,none,future_problem_solving,summarize;check_understanding,Sandy
+Pat,300,That's it. Let's write it down.,defusing,none,future_problem_solving,,Pat

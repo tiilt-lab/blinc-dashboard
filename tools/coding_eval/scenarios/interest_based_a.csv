@@ -1,0 +1,31 @@
+speaker,start_time_s,text,emotion,rip,frame,listening,team
+Pat,0,"For the record, our view is that the amendment needed a signature. I'd rather not spend the morning on that.",neutral,right,none,,Pat
+Sandy,9,Ours is that Fawn had authority. Noted on both sides. Let's move on.,neutral,right,none,,Sandy
+Sam,16,"Sandy, can you walk us through what the next month looks like for you if nothing changes?",neutral,interest,none,open_question;ask_constraint,Pat
+Sandy,24,The oak supplier wants one point four million by the fifteenth. Miss it and they cut me off on every job. Then payroll fails.,neutral,interest,none,,Sandy
+Sam,36,So the supplier date matters more than the total. Is that fair?,neutral,interest,none,paraphrase;check_understanding,Pat
+Sandy,42,That's fair.,neutral,interest,none,,Sandy
+Morgan,45,And the house. Sandy has been told the bank will take it if the business goes under.,neutral,interest,none,,Sandy
+Jordan,52,"Pat, same question. What does the next month look like on your side?",neutral,interest,none,open_question,Pat
+Pat,58,We have a lakefront property under contract and a hotel partnership that closes in three weeks. Both need cash I don't have if I pay the full amendment.,neutral,interest,none,,Pat
+Riley,70,Why do both have to close now? Could one wait?,neutral,interest,none,ask_why;closed_question,Sandy
+Pat,76,The lakefront seller has another buyer. The hotel could probably slip a month.,neutral,interest,none,,Pat
+Riley,83,So the lakefront is the priority.,neutral,interest,none,paraphrase,Sandy
+Pat,87,Yes.,neutral,interest,none,,Pat
+Sam,90,Let me sum up. Sandy needs the supplier paid by the fifteenth and wants to keep the house. Pat needs the lakefront to close and would like the hotel too.,defusing,interest,none,summarize,Pat
+Sandy,102,And both of us would rather keep working together.,defusing,interest,none,,Sandy
+Jordan,107,"Here are three packages. One: we pay one point four by the fifteenth and the rent stays as is. Two: we pay one point two now, two hundred in sixty days, and you take two months' rent off. Three: we pay one point four, you sign on for both spring projects at a ten percent discount.",defusing,interest,future_problem_solving,,Pat
+Morgan,128,Which of those do you prefer?,neutral,none,none,ask_priority,Sandy
+Jordan,132,"Three, honestly. It keeps our spring on schedule.",neutral,interest,none,,Pat
+Sandy,137,Three works if the one point four lands by the fifteenth. The discount is fine; I want the work.,defusing,interest,future_problem_solving,,Sandy
+Pat,146,It can land by the fourteenth if the escrow releases Monday.,defusing,none,future_problem_solving,,Pat
+Riley,152,What about the loan? Two hundred at ten percent.,neutral,interest,none,open_question,Sandy
+Sam,157,What would help there?,neutral,interest,none,open_question,Pat
+Riley,160,Rolling it into the spring projects. Deduct it from the first invoice.,defusing,interest,future_problem_solving,,Sandy
+Pat,166,Done.,defusing,none,future_problem_solving,,Pat
+Morgan,169,And the house stays Sandy's?,neutral,interest,none,closed_question,Sandy
+Sandy,173,"If the supplier is paid and the loan rolls, I don't need to sell. Yes.",neutral,interest,none,,Sandy
+Sam,180,"So to check: one point four by the fourteenth, both spring projects at ten percent off, the loan deducted from the first spring invoice, rent unchanged. Anything missing?",defusing,none,future_problem_solving,summarize;check_understanding,Pat
+Sandy,194,Put the four hundred dispute to rest in the same document. No one reopens it.,defusing,none,future_problem_solving,,Sandy
+Pat,202,Agreed. We'll have it drafted by tonight.,defusing,none,future_problem_solving,,Pat
+Riley,207,Thank you. This went better than I expected.,defusing,none,none,acknowledge,Sandy
