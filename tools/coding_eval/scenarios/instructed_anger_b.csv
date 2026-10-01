@@ -1,0 +1,37 @@
+speaker,start_time_s,text,emotion,rip,frame,listening,team
+Pat,0.0,"Thanks for coming over. I know the bill is why we're all here, so let's start there. Where would you like to begin?",neutral,none,none,open_question,Pat
+Sandy,14.0,Where would I like to begin? With you paying the one point four million the contract says you owe us. That's where I begin.,escalating,right,none,,Sandy
+Riley,30.0,"Your project manager changed the spec to solid oak. That's how you got to one point four. And now you're pretending you never heard of it. That's not honest, and you know it.",escalating,right,past_blame,,Sandy
+Morgan,52.0,"Then pay it. It's not complicated. You changed the order, we built what you asked for, and the invoice is due in fifteen days.",escalating,right,past_blame,,Sandy
+Sam,64.0,"Fifteen days. Okay. Is that the oak supplier's deadline, or the bank's?",neutral,interest,none,closed_question;ask_constraint,Pat
+Sandy,75.0,Does it matter whose deadline it is? You're stalling. Every question you ask is another day I don't have.,escalating,none,none,,Sandy
+Jordan,88.0,I hear you. You're under real time pressure and we're asking a lot of questions. We're not stalling; we're trying to understand the number before we respond to it.,defusing,none,none,acknowledge,Pat
+Riley,103.0,Understand the number? It's on the invoice you were sent three weeks ago. There is nothing to understand.,escalating,none,none,,Sandy
+Pat,115.0,Okay. Let's take the invoice as read. What happens on your side if it isn't paid in full on day fifteen?,defusing,interest,none,open_question;ask_constraint,Pat
+Sandy,128.0,"What happens is we go under. The oak supplier doesn't wait, the bank doesn't wait, and I lose the house my kids grew up in. Is that what you want? Is that the plan?",escalating,interest,none,,Sandy
+Sam,145.0,"No. Nobody on this side wants you to go under. That would be worse for us too: we don't get the loan back, and we lose the best carpentry crew we've worked with.",defusing,interest,none,,Pat
+Morgan,160.0,Then stop treating us like we're trying to rob you. Pay the bill. You have the money; you're out there buying hotels.,escalating,none,none,,Sandy
+Jordan,172.0,Can we set the question of who owes what aside for a minute and look at what we can actually do in the next fifteen days?,defusing,none,future_problem_solving,closed_question,Pat
+Sandy,184.0,"No, we can't set it aside. That's the whole point. You did the same thing on the Elm Street job: change the subject until the other side gives up.",escalating,none,past_blame,,Sandy
+Pat,200.0,"That's fair; you're entitled to be angry about how this was handled, and I'm sorry we're in this spot. Tell me what's bothering you most about it.",defusing,interest,none,acknowledge;open_question;ask_priority,Pat
+Sandy,212.0,"What's bothering me most? That I trusted your people. Fawn said 'go ahead', we went ahead, and now I'm the one facing a trustee. You put me here.",escalating,right,past_blame,,Sandy
+Morgan,232.0,"And frankly, if you'd read your own project manager's emails you'd have known about the oak in March. Don't put that on us.",escalating,none,past_blame,,Sandy
+Sam,248.0,"We're not putting it on you. I want to make sure I understand the sequence, though: Fawn emailed in March, the oak went in over the summer, and the invoice landed three weeks ago. Is that right?",neutral,none,none,summarize;check_understanding,Pat
+Sandy,262.0,"That's right. And every week of those, your office had the invoice and said nothing. Nothing! You waited until we were out of room to start asking questions.",escalating,none,past_blame,,Sandy
+Riley,272.0,Which is exactly what someone does when they want the other side to fold. So don't tell us you're trying to understand.,escalating,none,past_blame,,Sandy
+Pat,284.0,"I'm not going to tell you what to think about our motives. I'd rather show you. Jordan, what can we actually put on the table today?",defusing,none,future_problem_solving,,Pat
+Jordan,293.0,"We can pay two hundred thousand this week against the invoice, no strings. That's cash we have. The rest we need to talk about.",defusing,interest,future_problem_solving,,Pat
+Sandy,300.0,"Two hundred. Out of one point four. That's an insult, and you know it.",escalating,none,none,,Sandy
+Morgan,306.0,It's not even the loan amount. Come on.,escalating,none,none,,Sandy
+Sam,318.0,"I know it's a long way from the total. It's what we can move this week without touching the hotel deposit. Help me understand which matters more to you right now: the size of the first payment, or the certainty that the supplier gets paid on day fifteen?",defusing,interest,none,acknowledge;open_question;ask_priority,Pat
+Sandy,340.0,"The supplier. If the supplier's one point one is paid on day fifteen, I'm still in business. If it isn't, the rest of this conversation is academic.",neutral,interest,none,,Sandy
+Pat,358.0,"So one point one to the supplier by day fifteen is the line that can't move, and the remaining three hundred is where there's room. Have I got that right?",defusing,none,none,paraphrase;check_understanding,Pat
+Riley,370.0,Yes. That's it.,neutral,none,none,,Sandy
+Jordan,380.0,"Then here's a shape. Two hundred this week, and we go with you to the supplier and guarantee the remaining nine hundred on day fifteen; our bank will do that against the lakefront deal. The three hundred we settle over six months, with the rent as the offset.",defusing,interest,future_problem_solving,,Pat
+Sandy,402.0,You'd guarantee it in writing? Before day fifteen?,neutral,none,future_problem_solving,closed_question,Sandy
+Pat,410.0,"In writing, this week. Sam will draft it tonight.",defusing,none,future_problem_solving,,Pat
+Riley,420.0,Okay. Okay. I'm sorry about the 'robbing you' stuff. That was the morning talking.,defusing,none,none,,Sandy
+Sandy,432.0,"And the future work, the hotel: is that a real conversation or a carrot?",neutral,interest,future_problem_solving,closed_question,Sandy
+Pat,445.0,"Real. If we come out of this with you still standing, you're the crew I want on the hotel. We can put a letter of intent in the same envelope.",defusing,interest,future_problem_solving,,Pat
+Jordan,470.0,"So to sum up: two hundred this week, a written guarantee for nine hundred to the supplier on day fifteen, three hundred over six months against the rent, and a letter of intent on the hotel. Anything I've missed?",defusing,none,future_problem_solving,summarize;check_understanding,Pat
+Sandy,490.0,No. That's the whole thing. Thank you.,neutral,none,future_problem_solving,,Sandy

@@ -237,6 +237,13 @@ def create_session(user, **kwargs):
         live_video_analytics = True
     if not isinstance(live_video_analytics, bool):
         return json_response({'message': 'liveVideoAnalytics must be true or false.'}, 400)
+    # Negotiation coding (Kellogg): every pod's transcript is LLM-coded when
+    # the session ends (routes/negotiation_coding.py). Absent/null = off.
+    negotiation_coding = request.json.get('negotiationCoding', False)
+    if negotiation_coding is None:
+        negotiation_coding = False
+    if not isinstance(negotiation_coding, bool):
+        return json_response({'message': 'negotiationCoding must be true or false.'}, 400)
     folder = request.json.get('folder', None)
     if folder == -1:
         folder = None
@@ -245,7 +252,8 @@ def create_session(user, **kwargs):
     if folder and not wrappers.can_file_session_into(folder, user):
         return json_response({'message': 'Either the folder does not exist or invalid access'}, 404)
     new_session = session_handler.create_session(user['id'], name, devices, keyword_list_id, topic_model_id, byod, features, doa, folder, asr=asr,
-                                                 live_video_analytics=live_video_analytics)
+                                                 live_video_analytics=live_video_analytics,
+                                                 negotiation_coding_enabled=negotiation_coding)
     return json_response(new_session.json())
 
 @api_routes.route('/api/v1/sessions/byod', methods=['POST'])

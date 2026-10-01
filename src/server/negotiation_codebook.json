@@ -1,0 +1,199 @@
+{
+  "version": "viking-v2",
+  "description": "Per-utterance codes for the Kellogg 'Viking Investments' negotiation case (Pat vs Sandy), worded from Prof. Wang's Class 4 decks (docs/viking/codebook-notes.md). Four dimensions: emotion, rip (rights / interests / power), frame and listening. Each code has a one-line decision rule and example utterances; 'guidance' is the rule for the whole dimension, 'conventions' settle the listening choices the labels alone leave open, and 'case_facts' is shown to the coder so references in the transcript resolve.",
+  "case_facts": [
+    "Pat is a real estate developer and landlord; Sandy owns a carpentry business. The dispute is over work done at a condo project.",
+    "Sandy must pay a $1.4M bill for oak within 15 days or go bankrupt, owes Pat a $200K loan at 10%, rents space from Pat ($10K/month) and may have to sell the house.",
+    "Pat wants to invest in a lakefront property and a hotel and must act immediately; Pat views the amended bill as fair.",
+    "The contract was amended by Fawn (some materials call this person Alex; treat both names as the same person) 'based on past practice'; the contract says 'changes must be in writing'.",
+    "If Sandy goes bankrupt a trustee seizes the assets; Pat recovers less than the $210K loan and cannot offset it.",
+    "Some participants were instructed to display anger for at least the first 10 minutes."
+  ],
+  "dimensions": {
+    "emotion": {
+      "multi": false,
+      "default": "neutral",
+      "guidance": "The speaker's tone toward the counterpart in this utterance, not the topic. Escalating even when delivered calmly: a threat or ultimatum, a counter-threat (even if it ends by inviting the other side to stand down), an accusation or hard line about what the counterpart did or failed to do. Defusing even without feeling words: a concession, a settlement proposal, a turn toward what would work for the other side, restating the deal and asking whether one has it right. 'Calm down' is NOT defusing (it dismisses the anger). Code neutral only when the utterance is neither.",
+      "codes": {
+        "escalating": {
+          "definition": "A communication irritator: telling the other side what to do; labelling their behaviour negatively ('unfair', 'unreasonable'); accusing them of intentional violations; blaming; large demands; dismissing their arguments without a counterpoint; interrupting; raised intensity. Also counter-anger, sarcasm, a hard line with an edge, a threat, ultimatum or counter-threat.",
+          "examples": [
+            "That's ridiculous.",
+            "You're the one who caused this.",
+            "That is completely unreasonable and you know it.",
+            "You need to pay the bill, full stop.",
+            "I could tie this up in court for years if I wanted to."
+          ]
+        },
+        "defusing": {
+          "definition": "A defuse move: keeping cool or taking a break; seeking to understand why they are angry; giving voice to their anger; helping them focus on underlying interests. Also a concession, a settlement proposal, asking what would work for them, summarising the deal and checking that both sides understood.",
+          "examples": [
+            "I can see that you're angry, and I'm sorry we're in this situation. Tell me what's on your mind.",
+            "What do you want going forward?",
+            "What would help to put this behind us?",
+            "I can see why you're frustrated.",
+            "Can we slow this down for a minute?",
+            "What if I paid part now and we settled the rest later?"
+          ]
+        },
+        "neutral": {
+          "definition": "Neither: information, positions, answers and questions given in a level tone.",
+          "examples": [
+            "The payment is due on the fifteenth.",
+            "Two of our tenants defaulted this quarter."
+          ]
+        }
+      }
+    },
+    "rip": {
+      "multi": false,
+      "default": "none",
+      "guidance": "What the utterance appeals to: power (ability to coerce and harm the other side's interests), rights (independent standards with perceived legitimacy or fairness) or interests (needs, desires, concerns, motivations, priorities: WHY do you want what you want). A question is interest only when it asks about the counterpart's needs, priorities or constraints; a question about facts, causes, or whether a position can move is none. Restating the counterpart's argument is none. A consequence the speaker would suffer is a constraint (interest), not power. Saying something was not approved, signed or authorised as required is right.",
+      "codes": {
+        "interest": {
+          "definition": "Needs, desires, concerns, motivations, priorities: WHY someone wants what they want, WHAT those interests allow, HOW to work toward solutions. In this case: Pat investing in the lakefront property or hotel and keeping the team together; Sandy avoiding bankruptcy and keeping the house.",
+          "examples": [
+            "What do you need the cash for?",
+            "I need to avoid bankruptcy.",
+            "If I miss that payment my supplier cuts me off.",
+            "Why is the timing so important to you?"
+          ]
+        },
+        "right": {
+          "definition": "Independent standards with perceived legitimacy or fairness: contracts, legal rights, precedent, norms. In this case: the contract and 'changes must be in writing' (Pat); Fawn's authority to amend based on past practice and 'acted in Pat's best interest' (Sandy). Includes saying that work or a change was not approved or signed as required.",
+          "examples": [
+            "The contract says changes must be in writing.",
+            "Alex had authority based on past practice.",
+            "Fawn acted in your best interest, as always."
+          ]
+        },
+        "power": {
+          "definition": "Ability to coerce and harm the other side's interests: threats, force, strike, status; raised voices, insults, table pounding. A 'wise threat' ('If you do not ____, then I will ____.') is power. In this case: forcing Sandy's bankruptcy, withholding future work, calling the loan (Pat); declaring bankruptcy (Sandy).",
+          "examples": [
+            "I can call the loan.",
+            "If you force me into bankruptcy, you may not recover the money.",
+            "If you do not pay by Friday, then I will file for bankruptcy."
+          ]
+        },
+        "none": {
+          "definition": "None of interest, right or power: questions about facts or causes, paraphrases of the other side, procedural or social talk, and blame for the past that invokes no standard, need or threat.",
+          "examples": [
+            "So you're saying the timing is the problem.",
+            "When did you first hear about it?",
+            "If you had been there, none of this would have happened."
+          ]
+        }
+      }
+    },
+    "frame": {
+      "multi": false,
+      "default": "none",
+      "guidance": "Time orientation. past_blame when the utterance looks back at what happened to say who is responsible or what went wrong; future_problem_solving when it proposes, asks for, agrees to, restates or confirms an arrangement or next step; none otherwise: facts, needs, constraints, positions, threats, and questions about facts or about whether a deadline is flexible.",
+      "codes": {
+        "past_blame": {
+          "definition": "Looks back to say who caused the problem or what went wrong: who signed or approved what, who was unreachable, what was done without the required authority. The anger obstacle: focused on the past, vindictive.",
+          "examples": [
+            "You went on vacation and left Alex in charge.",
+            "You tried to take advantage of me."
+          ]
+        },
+        "future_problem_solving": {
+          "definition": "Proposes, asks for, agrees to, restates or confirms a concrete next step, option or arrangement: what happens now, how to structure a deal, a trade, a schedule, the terms on the table.",
+          "examples": [
+            "What has to happen in the next 15 days?",
+            "How can we structure this so you can make the investment and I can pay the supplier?"
+          ]
+        },
+        "none": {
+          "definition": "Neither: facts, needs, constraints, positions, threats, and questions about facts or flexibility.",
+          "examples": [
+            "I don't have that much cash.",
+            "Is the date firm?"
+          ]
+        }
+      }
+    },
+    "listening": {
+      "multi": true,
+      "default": [],
+      "guidance": "Interest-oriented listening moves made in this utterance: not interrupting; curious questions that help understand ('Tell me more', 'Help me understand'); paraphrasing what was heard; summing up what the other side's interests seem to be; then offering solutions. Several may apply, [] when none. A plain statement, answer, threat or position with no question, restatement or acknowledgment gets []. Commenting, judging and insulting are not listening moves.",
+      "conventions": [
+        "Every question gets its form label, open_question (what/how/why/tell me) or closed_question (yes/no or one fact), plus any content label that applies: ask_why, ask_priority, ask_constraint.",
+        "check_understanding replaces closed_question when the speaker asks whether they understood the counterpart correctly.",
+        "If the preceding utterance ends unfinished (trails off with '...'), this utterance cuts in and gets interrupt.",
+        "Answering yes or no is not acknowledge."
+      ],
+      "codes": {
+        "open_question": {
+          "definition": "A question that invites an open answer (what, how, why, tell me).",
+          "examples": [
+            "Tell me what is bothering you most.",
+            "Tell me more.",
+            "Help me understand why the date matters."
+          ]
+        },
+        "closed_question": {
+          "definition": "A yes/no or single-fact question, including 'Can we...?', 'Is it...?', 'Do you...?' forms that open a topic.",
+          "examples": [
+            "Did you sign it?"
+          ]
+        },
+        "paraphrase": {
+          "definition": "Restates the counterpart's last point in the speaker's own words.",
+          "examples": [
+            "So you're saying the timing is the problem."
+          ]
+        },
+        "summarize": {
+          "definition": "Pulls several points together, or sums up what the other side's interests seem to be, or the deal on the table.",
+          "examples": [
+            "So far we have the loan, the supplier and the timeline."
+          ]
+        },
+        "acknowledge": {
+          "definition": "Names or accepts the counterpart's feeling or situation without necessarily agreeing.",
+          "examples": [
+            "I can see why you're frustrated."
+          ]
+        },
+        "check_understanding": {
+          "definition": "Asks whether the speaker has understood the counterpart correctly.",
+          "examples": [
+            "So your main concern is getting enough cash quickly for the lakefront property—is that right?"
+          ]
+        },
+        "ask_why": {
+          "definition": "Asks for the reason behind a position or event.",
+          "examples": [
+            "Why does it have to be this week?"
+          ]
+        },
+        "ask_priority": {
+          "definition": "Asks which issue or option matters most.",
+          "examples": [
+            "Which of these three issues matters most to you?"
+          ]
+        },
+        "ask_constraint": {
+          "definition": "Asks what limits, deadlines or requirements the counterpart faces.",
+          "examples": [
+            "What has to happen in the next 15 days?"
+          ]
+        },
+        "interrupt": {
+          "definition": "Cuts the counterpart off or talks over them.",
+          "examples": []
+        }
+      },
+      "notes": {
+        "strong": [
+          "So your main concern is getting enough cash quickly for the lakefront property—is that right?",
+          "Which of these three issues matters most to you?"
+        ],
+        "weak": [
+          "Don't you understand that I need the money?"
+        ]
+      }
+    }
+  }
+}

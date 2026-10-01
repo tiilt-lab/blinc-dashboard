@@ -1,0 +1,21 @@
+speaker,start_time_s,text,emotion,rip,frame,listening,team
+Sandy,0.0,"Thanks for making the time, Pat. Before we get into numbers, can you walk me through how you see where things stand?",neutral,none,none,open_question,Sandy
+Pat,8.5,"Honestly? I'm looking at an invoice for a hundred and eighty thousand dollars for work I never signed off on. That's how I see it.",escalating,right,past_blame,,Pat
+Sandy,18.0,"So your position is that the change order isn't valid because you personally didn't sign it.",neutral,none,none,paraphrase,Sandy
+Pat,25.0,"Alex had no authority to approve a change of that size. Read the contract: anything over fifty thousand needs my signature.",escalating,right,past_blame,,Pat
+Sandy,34.0,"Alex is your project manager. He signed it on your letterhead while I was on vacation, and my foreman did the work in good faith.",neutral,right,past_blame,,Sandy
+Pat,44.0,"If you'd been reachable, none of this would have happened.",escalating,none,past_blame,,Pat
+Sandy,50.0,"I hear that you're frustrated, and I'd be too. Can we set aside who should have been reachable and look at what we do now?",defusing,none,future_problem_solving,acknowledge;closed_question,Sandy
+Pat,60.0,"Fine. But I want you to understand my situation: the bank pulled our credit line last month. I don't have a hundred and eighty thousand in cash. I don't have half that.",neutral,interest,none,,Pat
+Sandy,72.0,"Why did the bank pull the line?",neutral,none,none,open_question;ask_why,Sandy
+Pat,76.0,"Two of our tenants defaulted in the same quarter. It's temporary, but the timing is brutal.",neutral,interest,none,,Pat
+Sandy,83.0,"Okay, so cash is tight for at least this quarter. Here's my constraint: I have a supplier payment of ninety thousand due in fifteen days, and that invoice is what was supposed to cover it.",neutral,interest,none,paraphrase,Sandy
+Pat,95.0,"Is there any flexibility on that date, or is fifteen days hard?",neutral,none,none,closed_question;ask_constraint,Pat
+Sandy,100.0,"It's hard. Miss it and they put me on cash-on-delivery for every job I have running. That would sink me faster than it sinks you.",neutral,interest,none,,Sandy
+Pat,110.0,"Look, I could just let you sue me over the change order and tie it up for two years. My lawyer says Alex's signature won't hold.",escalating,power,none,,Pat
+Sandy,120.0,"You could. And I could file a lien on the building tomorrow, and your other tenants would love reading about that. But neither of us wants that, do we?",escalating,power,none,closed_question,Sandy
+Pat,132.0,"No. We don't. So what would actually work for you? What matters most: getting the full amount, or getting the supplier paid on time?",defusing,none,future_problem_solving,open_question;ask_priority,Pat
+Sandy,142.0,"The supplier, honestly. If ninety goes out in fifteen days, the rest can wait. And you still own that lakefront lot on Route 9, right? I've been...",neutral,interest,future_problem_solving,closed_question,Sandy
+Pat,152.0,"The lakefront lot? You want the lot?",neutral,none,none,interrupt;closed_question,Pat
+Sandy,156.0,"I've wanted it for years, you know that. Say you pay ninety in cash within fifteen days and we settle the remaining ninety against the lot, at whatever an appraiser says it's worth. Does that sound like something you could live with?",defusing,interest,future_problem_solving,closed_question,Sandy
+Pat,170.0,"So, to make sure I've got this: ninety in cash in fifteen days, which I can stretch to; the balance against the Route 9 lot at appraisal; and the change order dispute goes away. Have I got that right?",defusing,none,future_problem_solving,summarize;check_understanding,Pat

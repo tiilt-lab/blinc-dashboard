@@ -1,0 +1,35 @@
+speaker,start_time_s,text,emotion,rip,frame,listening,team
+Sandy,0.0,"Thanks for coming. I want to say where we stand and then mostly listen. Our position is that Fawn's instruction was a valid change under the contract, and the one point four million is due. That's the rights piece, and I'll leave it there.",neutral,right,none,,Sandy
+Pat,18.0,"Understood. Ours is that Section 19 needed an officer's signature and it didn't get one. I'll leave it there too, because I don't think either of us wins by arguing that for an hour.",neutral,right,none,,Pat
+Jordan,36.0,"So instead, can you help us understand what the fifteen days actually means for you? Walk us through it.",neutral,interest,none,open_question;ask_constraint,Pat
+Sandy,50.0,"On day fifteen the oak supplier needs one point one million in cleared funds, or he stops shipping to every job we have and calls his lawyer. The same day, the bank reviews our line. If the supplier's paid, the bank is manageable.",neutral,interest,none,,Sandy
+Sam,70.0,"So the supplier is the hard constraint, and the bank follows from it.",neutral,none,none,paraphrase,Pat
+Riley,78.0,"Exactly. And behind both is the house. If the line gets called, the house goes, because it's the collateral.",neutral,interest,none,,Sandy
+Pat,90.0,"Which matters more to you, honestly: keeping the house, or keeping the business?",neutral,interest,none,closed_question;ask_priority,Pat
+Sandy,100.0,"The business. The house is my wife's line in the sand, but if I had to pick, it's the crew. Twenty-two people.",neutral,interest,none,,Sandy
+Jordan,112.0,"Okay. Let me tell you ours, then. The lakefront lot closes in three weeks and we need six hundred thousand in cash for it, and the hotel is contingent on the lakefront. So cash in the next month is very tight, and after that it's fine.",neutral,interest,none,,Pat
+Morgan,130.0,Help me understand why the hotel depends on the lakefront closing.,neutral,interest,none,open_question;ask_why,Sandy
+Pat,142.0,"Same seller. He'll only sell the hotel to whoever buys the lot, and he has another buyer waiting on the lot.",neutral,interest,none,,Pat
+Riley,155.0,"So you need six hundred out the door in three weeks, no matter what, or both deals go.",neutral,none,none,paraphrase,Sandy
+Pat,162.0,Right.,neutral,none,none,,Pat
+Sam,168.0,Then let me try to sum up both sides. You need one point one to the supplier by day fifteen and to keep the crew together. We need six hundred liquid inside three weeks and the hotel deal to go through. Have I missed anything?,neutral,interest,none,summarize;check_understanding,Pat
+Sandy,185.0,"One thing: the loan. We owe you two hundred at ten percent, and I'd rather it didn't sit there accruing while we sort this out.",neutral,interest,none,,Sandy
+Jordan,196.0,"Noted. So we have four things: the supplier payment, your crew, our six hundred, and the loan. Plus the rent, which nobody's mentioned yet.",neutral,none,none,summarize,Pat
+Morgan,210.0,"And the house. We'd rather sell it on our terms than have the bank sell it on theirs, if it comes to that.",neutral,interest,none,,Sandy
+Pat,222.0,"Okay. Rather than one offer, let me put three shapes on the table, and you tell us which is closest. A: we pay one point one straight to your supplier on day fifteen, you sell the house and repay the two hundred loan from it, and the remaining three hundred we pay over twelve months. B: we pay one point four in full on day thirty, and you bridge the supplier with a letter from our bank; the loan stays as it is. C: we pay eight hundred on day fifteen and six hundred on day forty-five, after the lakefront closes, and we forgive the loan interest.",defusing,interest,future_problem_solving,,Pat
+Sandy,260.0,Can I ask about B first? A letter from your bank: would the supplier actually accept that instead of cash?,neutral,none,future_problem_solving,closed_question,Sandy
+Sam,275.0,"He's accepted one from us before, on the Maple Court job. Same bank.",neutral,none,none,,Pat
+Riley,285.0,"Then B's out, honestly, because day thirty is past the bank review and the letter doesn't fix the line. A and C both work on the supplier. What's the difference between them for you?",neutral,interest,future_problem_solving,open_question;ask_priority,Sandy
+Jordan,302.0,"A keeps our cash whole because the three hundred is spread out. C costs us the interest and the timing on the lakefront, but it's simpler for you. We can live with either; A is easier on us.",neutral,interest,future_problem_solving,,Pat
+Sandy,318.0,"A means selling the house, which is the thing my wife doesn't want. But if it's on our timetable, and the loan clears with it, I think she'd agree. Can we make the house sale ninety days, not thirty?",defusing,interest,future_problem_solving,closed_question,Sandy
+Pat,338.0,Ninety is fine for us. The loan just needs to clear when it sells.,defusing,interest,future_problem_solving,,Pat
+Morgan,348.0,"What about the rent? We're at ten a month with you, and if the crew stays, we need the space for at least two more years.",neutral,interest,future_problem_solving,open_question,Sandy
+Sam,360.0,"Two-year renewal at the same rate, and we'd want it in the same document so the whole thing closes at once.",defusing,interest,future_problem_solving,,Pat
+Riley,372.0,Agreed. And the hotel: is the crew on it?,neutral,interest,future_problem_solving,closed_question,Sandy
+Pat,380.0,"If we're doing A, yes. The hotel's a fourteen-month build and I'd rather not go looking for a new crew. We'll put a right of first refusal in writing.",defusing,interest,future_problem_solving,,Pat
+Sandy,396.0,Then I think we're there. Let me say it back so we're sure: one point one to the supplier on day fifteen; three hundred over twelve months; the house sold within ninety days and the two hundred loan repaid from it; a two-year lease renewal at ten; first refusal on the hotel. Is that everyone's understanding?,defusing,none,future_problem_solving,summarize;check_understanding,Sandy
+Jordan,420.0,That's ours.,neutral,none,future_problem_solving,,Pat
+Morgan,425.0,"One more thing, sorry. The twelve months on the three hundred: does that start on day fifteen or on signing?",neutral,none,future_problem_solving,closed_question,Sandy
+Sam,435.0,Day fifteen. We'll write it that way.,neutral,none,future_problem_solving,,Pat
+Riley,442.0,Good. Thanks for doing it this way. I came in expecting a fight.,neutral,none,none,,Sandy
+Pat,450.0,So did we. Let's get it on paper before anyone's lawyer wakes up.,neutral,none,future_problem_solving,,Pat

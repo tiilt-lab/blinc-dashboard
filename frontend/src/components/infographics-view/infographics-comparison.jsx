@@ -5,6 +5,7 @@ import { ConversationDynamicsPanel } from "../conversation-dynamics/conversation
 import { DiscussionSummaryPanel } from "../discussion-summary/discussion-summary-panel"
 import { VideoPlayer } from "../video-player/video-player"
 import { PosthocTrigger } from "../posthoc/posthoc-trigger"
+import { NegotiationCodingPanel } from "../negotiation-coding/negotiation-coding-panel"
 import { ModelNote } from "../model-note/model-note"
 import { AppTimelineSlider } from "../timeline-slider/timeline-slider-component"
 import { AppIndividualFeaturesComponent } from "../individualmetrics/features-component"
@@ -189,6 +190,24 @@ function AppInfographicsComparison(props) {
                       </AppSectionBoxComponent>
                   ),
               },
+              // Instructor view only (not the student BYOD page). Renders
+              // nothing unless the session opted in or a run exists — the
+              // panel owns its section box for that reason.
+              ...(!props.fromclient
+                  ? [
+                        {
+                            key: "negotiation",
+                            modality: "Verbal",
+                            node: (
+                                <NegotiationCodingPanel
+                                    session={props.session}
+                                    sessionDeviceId={props.sessionDevice.id}
+                                    tagCounts={props.tagCounts}
+                                />
+                            ),
+                        },
+                    ]
+                  : []),
               {
                   key: "summary",
                   modality: "Record & logs",

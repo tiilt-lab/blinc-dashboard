@@ -1,0 +1,31 @@
+speaker,start_time_s,text,emotion,rip,frame,listening,team
+Jordan,0,Our position is simple. Section four of the contract says changes must be in writing and signed by Pat.,neutral,right,none,,Pat
+Riley,9,Section four also says the owner's representative can approve field changes. Fawn is the representative.,neutral,right,none,,Sandy
+Jordan,19,A field change is a wall moved six inches. This is four hundred thousand dollars of oak.,neutral,right,none,,Pat
+Morgan,28,The contract doesn't put a dollar limit on field changes. Read it.,escalating,right,none,,Sandy
+Sam,35,It doesn't need to. Any court would read that clause narrowly.,neutral,right,none,,Pat
+Sandy,42,Any court would also look at six years of past practice. Fawn has approved upgrades on every job.,neutral,right,none,,Sandy
+Pat,52,Past practice doesn't override an express written term.,neutral,right,none,,Pat
+Riley,59,It does when the other party has accepted the practice for years. That's course of dealing.,neutral,right,none,,Sandy
+Jordan,68,Was there a signed change order for the oak? Yes or no.,neutral,none,none,closed_question,Pat
+Sandy,74,There was an email from Fawn approving it.,neutral,right,none,,Sandy
+Jordan,79,An email is not a signed change order.,neutral,right,none,,Pat
+Morgan,84,In this industry an email from the owner's rep is exactly that.,neutral,right,none,,Sandy
+Sam,90,Industry custom doesn't rewrite the contract either.,neutral,right,none,,Pat
+Riley,96,So your argument is that Fawn had no authority at all?,neutral,none,none,closed_question;paraphrase,Sandy
+Pat,102,Her authority was limited. She acted outside it.,neutral,right,none,,Pat
+Sandy,108,"She acted in your best interest, as always. The original oak spec would have failed inspection.",neutral,right,none,,Sandy
+Jordan,118,"Then the right move was to call Pat, not to approve it herself.",neutral,right,past_blame,,Pat
+Morgan,125,Pat was unreachable for two weeks.,neutral,none,past_blame,,Sandy
+Pat,130,Unreachable is not the same as having delegated authority.,neutral,right,none,,Pat
+Riley,137,What does the contract say about emergencies?,neutral,none,none,open_question,Sandy
+Sam,142,Nothing specific. Which means the default rule applies: written approval.,neutral,right,none,,Pat
+Sandy,150,"Which means a court decides, and that takes two years.",neutral,right,none,,Sandy
+Jordan,156,"If that's where this ends up, so be it.",neutral,right,none,,Pat
+Morgan,161,"Let's go back to the clause. Section four, paragraph two, defines representative.",neutral,right,none,,Sandy
+Pat,168,And paragraph three limits what the representative may approve.,neutral,right,none,,Pat
+Riley,174,Paragraph three says material substitutions of equal value. Oak for oak.,neutral,right,none,,Sandy
+Sam,181,Oak for oak at three times the price is not equal value.,neutral,right,none,,Pat
+Sandy,188,Equal in function. The spec never set a price.,neutral,right,none,,Sandy
+Jordan,194,We're going in circles. Our position stands.,neutral,right,none,,Pat
+Morgan,199,So does ours. We'll see you in court.,escalating,power,none,,Sandy

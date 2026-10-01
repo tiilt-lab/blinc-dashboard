@@ -1,0 +1,32 @@
+speaker,start_time_s,text,emotion,rip,frame,listening,team
+Jordan,0,We'll keep this short. You overbilled us by four hundred thousand and we are not paying it.,escalating,right,past_blame,,Pat
+Sam,8,What Jordan means is that we want to understand how the number got there.,defusing,none,none,paraphrase,Pat
+Riley,15,It got there because Fawn approved the oak upgrade while Pat was on vacation. Everyone knows that.,neutral,right,past_blame,,Sandy
+Morgan,24,"Riley, let them finish.",neutral,none,none,,Sandy
+Jordan,27,Approved by someone with no authority to approve it.,escalating,right,past_blame,,Pat
+Riley,32,"Someone you left in charge. Your choice, your problem.",escalating,none,past_blame,,Sandy
+Sandy,37,"Can we not. Morgan, what's the number if we strip the oak back to the original spec?",neutral,none,none,closed_question,Sandy
+Morgan,44,"Hang on. Original spec was one million forty, not one million. I have the bid here.",neutral,none,none,,Sandy
+Sam,51,"Thank you, that matters. So the gap is three sixty, not four hundred.",neutral,none,none,acknowledge;paraphrase,Pat
+Jordan,57,Three sixty we're not paying either.,escalating,none,none,,Pat
+Sam,61,"Hold on. Sandy, what would it take to get this resolved this week?",defusing,interest,none,open_question,Pat
+Sandy,67,Supplier paid by the fifteenth. That's the only thing that matters this week.,neutral,interest,none,,Sandy
+Riley,73,Which wouldn't be a problem if someone had answered the phone in March.,escalating,none,past_blame,,Sandy
+Morgan,79,Riley. The phone doesn't help us now. What helps is a date and a number.,defusing,none,future_problem_solving,,Sandy
+Pat,86,I can release the million in escrow by Monday.,defusing,none,future_problem_solving,,Pat
+Jordan,91,"Pat, we discussed holding that.",escalating,none,none,interrupt,Pat
+Pat,94,"And I'm deciding not to. Sam, note that down.",neutral,none,future_problem_solving,,Pat
+Sam,98,Noted. Can I suggest we take five minutes before the three sixty?,defusing,none,none,closed_question,Pat
+Sandy,104,Yes. Five minutes.,neutral,none,none,,Sandy
+Morgan,420,Okay. We're back. On the three sixty: what if it's paid out of the spring projects rather than cash?,defusing,interest,future_problem_solving,open_question,Sandy
+Jordan,430,There won't be spring projects if this is how you negotiate.,escalating,power,none,,Pat
+Sam,436,There will be spring projects. We need a crew and Sandy's is the best one we've had.,defusing,interest,none,,Pat
+Riley,443,Funny way of showing it.,escalating,none,past_blame,,Sandy
+Morgan,446,Riley. Please.,neutral,none,none,,Sandy
+Sandy,449,Spring work against the three sixty. At what discount?,neutral,interest,none,closed_question,Sandy
+Pat,455,"Ten percent on both projects, and the three sixty is deducted from the first invoice.",defusing,none,future_problem_solving,,Pat
+Morgan,462,"So the supplier gets the million Monday, the loan stays as is, the three sixty comes out of spring at ten percent off. Correct?",defusing,none,future_problem_solving,summarize;check_understanding,Sandy
+Sam,474,Correct.,neutral,none,future_problem_solving,,Pat
+Jordan,477,I still think we're being generous.,escalating,none,none,,Pat
+Sandy,481,You are. Thank you for it.,defusing,none,none,acknowledge,Sandy
+Riley,485,Fine. Write it up.,neutral,none,future_problem_solving,,Sandy

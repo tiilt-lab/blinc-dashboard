@@ -1,0 +1,31 @@
+speaker,start_time_s,text,emotion,rip,frame,listening,team
+Sandy,0,Let me be direct. Pay the full one point four by the fifteenth or I file for bankruptcy and you get nothing.,escalating,power,none,,Sandy
+Pat,10,"If you file, I call the loan the same day. Two hundred thousand, due immediately.",escalating,power,none,,Pat
+Riley,18,Call it. The trustee will tell you to get in line with every other creditor.,escalating,power,none,,Sandy
+Jordan,26,And the trustee will sell your house to pay us.,escalating,power,none,,Pat
+Morgan,32,You'd put a family on the street over a wood upgrade. Good to know who we're dealing with.,escalating,none,past_blame,,Sandy
+Sam,41,Nobody said that.,neutral,none,none,,Pat
+Sandy,45,You didn't have to. Here's another one: every crew in this county hears how Pat treats contractors.,escalating,power,none,,Sandy
+Pat,55,And every lender hears how Sandy's company walks away from loans.,escalating,power,none,,Pat
+Riley,62,We haven't walked away from anything. You're the one who stopped paying.,escalating,none,past_blame,,Sandy
+Jordan,69,We stopped paying four hundred thousand that was never approved. The rest is sitting in escrow.,neutral,right,none,,Pat
+Morgan,78,Escrow doesn't pay the supplier.,neutral,interest,none,,Sandy
+Sandy,83,"If I don't pay the supplier, I'm done. And if I'm done, you're done, because nobody else will finish your condos.",escalating,power,none,,Sandy
+Pat,94,That's a threat.,neutral,none,none,,Pat
+Sandy,97,It's arithmetic.,escalating,none,none,,Sandy
+Sam,101,"Can I say something? If this keeps going, both of you lose, and the only winner is the trustee.",defusing,interest,none,,Pat
+Jordan,110,"Here is where we are. If you do not withdraw the four hundred thousand, then we will let the court sort it out, and that takes two years you don't have.",escalating,power,none,,Pat
+Riley,122,"And if you do not release the escrow this week, then we file, and you don't see the two hundred back.",escalating,power,none,,Sandy
+Morgan,131,So we both have a gun on the table. Great.,escalating,none,none,,Sandy
+Sam,136,"Then let's both put them down for five minutes. Sandy, what do you actually need by the fifteenth?",defusing,interest,none,open_question;ask_constraint,Pat
+Sandy,146,Ninety percent of the supplier bill. Call it a million two.,neutral,interest,none,,Sandy
+Pat,152,The escrow is one million. That's close.,neutral,interest,none,,Pat
+Riley,157,Close doesn't keep the supplier shipping.,neutral,interest,none,,Sandy
+Sam,162,What if we release the million now and cover the other two hundred against the loan?,defusing,interest,future_problem_solving,open_question,Pat
+Sandy,171,Meaning you forgive the loan?,neutral,none,none,closed_question;check_understanding,Sandy
+Pat,175,"Meaning we net it. The supplier gets one point two, the loan is settled, and the four hundred is what we're still arguing about.",defusing,none,future_problem_solving,summarize,Pat
+Morgan,186,And you'd put that in writing today.,neutral,none,none,closed_question,Sandy
+Jordan,190,Today.,neutral,none,future_problem_solving,,Pat
+Sandy,193,"Then the four hundred goes to mediation, not court.",defusing,none,future_problem_solving,,Sandy
+Pat,198,"Agreed. Mediation, thirty days.",defusing,none,future_problem_solving,,Pat
+Riley,203,Thirty days. Fine.,defusing,none,future_problem_solving,,Sandy

@@ -36,6 +36,8 @@ from tables.rater import Rater
 from tables.session_synthesized_report import SessionSynthesizedReport
 from tables.rating import Rating
 from tables.survey_response import SurveyResponse
+from tables.negotiation_coding_run import NegotiationCodingRun
+from tables.negotiation_code import NegotiationCode
 
 # Saves changes made to database (models)
 def save_changes():
@@ -1961,3 +1963,62 @@ def mark_session_device_posthoc(session_device_id, models=None, durations=None):
             logging.warning("Could not persist posthoc_models: %s", e)
     db.session.commit()
     return True
+
+
+# -------------------------
+# Negotiation coding (negotiation_coding.py)
+# -------------------------
+
+def create_negotiation_run(session_device_id, model, codebook_version, teams=None):
+    run = NegotiationCodingRun(session_device_id, model, codebook_version, teams)
+    db.session.add(run)
+    db.session.commit()
+    return run
+
+def get_negotiation_run(run_id):
+    return db.session.query(NegotiationCodingRun).filter(NegotiationCodingRun.id == run_id).first()
+
+def get_latest_negotiation_run(session_device_id):
+    return db.session.query(NegotiationCodingRun) \
+        .filter(NegotiationCodingRun.session_device_id == session_device_id) \
+        .order_by(NegotiationCodingRun.id.desc()).first()
+
+def get_negotiation_runs(session_id):
+    """Every run of the session's pods, newest first."""
+    return db.session.query(NegotiationCodingRun) \
+        .join(SessionDevice, NegotiationCodingRun.session_device_id == SessionDevice.id) \
+        .filter(SessionDevice.session_id == session_id) \
+        .order_by(NegotiationCodingRun.id.desc()).all()
+
+def update_negotiation_run(run_id, **fields):
+    """Set the given columns; teams/summary given as dicts are stored as JSON."""
+    import json as _json
+    run = get_negotiation_run(run_id)
+    if run is None:
+        return None
+    for name, value in fields.items():
+        if name in ('teams', 'summary') and value is not None and not isinstance(value, str):
+            value = _json.dumps(value)
+        setattr(run, name, value)
+    db.session.commit()
+    return run
+
+def add_negotiation_codes(run_id, codes):
+    """The run's codes, wholesale: rows from an interrupted earlier attempt
+    (coordinator restart re-queues the job) are replaced, not doubled."""
+    db.session.query(NegotiationCode).filter(NegotiationCode.run_id == run_id).delete()
+    db.session.add_all([NegotiationCode(run_id, c['transcript_id'], c['emotion'], c['rip'],
+                                        c['frame'], c.get('listening')) for c in codes])
+    db.session.commit()
+    return len(codes)
+
+def get_negotiation_codes(run_id):
+    """(code, transcript) pairs of a run in transcript order."""
+    return db.session.query(NegotiationCode, Transcript) \
+        .join(Transcript, NegotiationCode.transcript_id == Transcript.id) \
+        .filter(NegotiationCode.run_id == run_id) \
+        .order_by(Transcript.start_time.asc(), Transcript.id.asc()).all()
+
+def session_device_transcript_count(session_device_id):
+    return db.session.query(func.count(Transcript.id)) \
+        .filter(Transcript.session_device_id == session_device_id).scalar() or 0

@@ -16,6 +16,9 @@ export class SessionModel {
   // false = "record now, analyse later": video is recorded during class but
   // not analysed live; the post-hoc video run is queued at session end.
   live_video_analytics;
+  // true = Kellogg negotiation class (Viking case): each pod's transcript is
+  // coded per utterance after it finishes and the coding panel is shown.
+  negotiation_coding;
   // The owner's email (sent for any session that is not the caller's own —
   // an admin's view of everyone's, or one shared through a folder), whether
   // it is theirs, and whether they may rename, move, delete or stop it.
@@ -75,6 +78,7 @@ export class SessionModel {
     model.participant_count = json['participant_count'] != null ? json['participant_count'] : null
     model.analysis_running = json['analysis_running'] === true
     model.live_video_analytics = json['live_video_analytics'] !== false
+    model.negotiation_coding = json['negotiation_coding'] === true
     model.owner = json['owner'] != null ? json['owner'] : null
     model.owned = json['owned'] !== false
     // Rename / move / delete allowed: owner, super, or an editor of its folder.

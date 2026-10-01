@@ -9,6 +9,14 @@ lease, or a live class is on) is not a failure: the job goes back to the
 front of the queue and is retried after N seconds (capped). A leg the queue
 gives up on is cancelled at the service so it stops holding the GPU.
 
+A third leg, ``coding`` (negotiation coding, negotiation_coding.py), is plain
+HTTP from this process to the always-resident llama-server: no post-hoc
+socket, no ticket, no GPU lease. A coding-only job therefore runs beside a
+live class (results are wanted minutes after a group finishes while other
+groups are still on) unless NEGOTIATION_CODING_WAIT_FOR_IDLE=1 makes it
+wait like the rest; while an audio/video job at the head holds for a class
+to end, queued coding jobs behind it run in the meantime.
+
 The queue itself is in Redis (keys below); the API workers enqueue, report
 and clear, and only the coordinator process runs jobs (start_runner).
 """
@@ -133,8 +141,10 @@ def _all_jobs():
     return jobs
 
 
-def _next_queued():
-    return next((j for j in _all_jobs() if j["state"] == "queued"), None)
+def _next_queued(beside_class=False):
+    # beside_class: only a job that may run while pods are live (_needs_idle).
+    return next((j for j in _all_jobs() if j["state"] == "queued"
+                 and not (beside_class and _needs_idle(j))), None)
 
 
 def _remove(job):
@@ -405,34 +415,76 @@ def _live_pods():
 
 
 def _wait_for_class_to_end():
-    # Idle gating: with a class on, don't even start the next job. One log
-    # line per wait, then one when it ends.
+    # Idle gating: with a class on, don't even start the next GPU job. One
+    # log line per wait, then one when it ends. Returns True once no pod is
+    # live; False when it stopped early because a job that may run beside
+    # the class (a coding leg) is queued — the caller runs that one first.
     n = _live_pods()
     if not n:
-        return
+        return True
     logging.info("posthoc queue: %d live pod(s) streaming; holding queued jobs until the class ends", n)
     while n:
+        if _next_queued(beside_class=True) is not None:
+            return False
         time.sleep(_LIVE_POLL_SECONDS)
         n = _live_pods()
     logging.info("posthoc queue: no live pods; resuming")
+    return True
+
+
+def _job_legs(job):
+    return job.get("legs") or list(DEFAULT_LEGS)
+
+
+def _needs_gpu(job):
+    # Everything but a coding-only job drives the post-hoc services.
+    return _job_legs(job) != ["coding"]
+
+
+def _needs_idle(job):
+    # Audio/video legs take the GPU and never start beside a live class. A
+    # coding-only job is HTTP to the resident llama-server and does, unless
+    # NEGOTIATION_CODING_WAIT_FOR_IDLE=1 defers it like the rest.
+    if _needs_gpu(job):
+        return True
+    return os.environ.get("NEGOTIATION_CODING_WAIT_FOR_IDLE", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _run_coding_leg(job):
+    # In this process, no socket/ticket/lease. The run row (created queued by
+    # the API route or end_session, id on the job) is marked running -> done
+    # by run_coding, or error with the message — which re-raises so the job
+    # fails too and the queue panel shows it.
+    import app as A
+    with A.app.app_context():
+        import negotiation_coding
+        negotiation_coding.run_coding(job["device_id"], run_id=job.get("run_id"))
 
 
 def _run_job(job):
-    base = _job_base(job)
+    base = None  # the trigger fields, built when the first audio/video leg needs them
     device_id = job["device_id"]
     models = job.get("models") or {}
     # Legs finished on an earlier attempt (before a gpu_busy deferral) are
     # not re-run; the list is persisted with the job.
     done = job.setdefault("done_legs", [])
     # A job may ask for a subset of legs (enqueue(..., legs=("video",)) for a
-    # session that recorded video without live analytics); absent = both.
-    wanted = job.get("legs") or list(LEGS)
+    # session that recorded video without live analytics, or ("coding",));
+    # absent = audio and video, the historic job.
+    wanted = _job_legs(job)
     deadline = time.time() + _POD_TIMEOUT
     attempted, errors = [], {}
     for scope in LEGS:
         if scope in done or scope not in wanted:
             continue
         attempted.append(scope)
+        if scope == "coding":
+            _run_coding_leg(job)
+            done.append(scope)
+            _save(job)
+            continue
+        if base is None:
+            base = _job_base(job)
         url = _leg_url(scope)
         if scope == "audio":
             init = dict(base, type="Initialize_audio_processing_analytics",
@@ -531,18 +583,20 @@ def _worker_loop():
         if job is None:
             return
         # A live class is on: hold here rather than have the service refuse
-        # us every retry_after. Re-pick under the lock afterwards — the
-        # queue may have been cleared while we waited.
-        _wait_for_class_to_end()
+        # us every retry_after — unless a coding job (no GPU) is queued
+        # behind, which runs beside the class meanwhile. Re-pick under the
+        # lock afterwards — the queue may have been cleared while we waited.
+        beside_class = _needs_idle(job) and not _wait_for_class_to_end()
         with _mutation():
-            job = _next_queued()
+            job = _next_queued(beside_class=beside_class)
             if job is None:
                 return
             job["state"] = "running"
             job["started_at"] = time.time()
             _save(job)
         try:
-            _maybe_recycle_audio_service()
+            if _needs_gpu(job):
+                _maybe_recycle_audio_service()
             _run_job(job)
             outcome, err = "done", None
         except _GpuBusy as busy:
@@ -604,12 +658,13 @@ def start_runner():
     return _worker
 
 
-LEGS = ("audio", "video")
+LEGS = ("audio", "video", "coding")   # run order within a job
+DEFAULT_LEGS = ("audio", "video")     # a job without legs: the historic run
 
 
 def _legs_extra(legs):
-    # None = both legs (the historic job); otherwise an ordered subset, e.g.
-    # ("video",) for a record-only session whose live ASR already ran.
+    # None = audio and video (the historic job); otherwise an ordered subset,
+    # e.g. ("video",) for a record-only session whose live ASR already ran.
     if legs is None:
         return None
     chosen = [s for s in LEGS if s in set(legs)]
@@ -620,9 +675,13 @@ def _legs_extra(legs):
 
 def enqueue(session_id, device_ids, models=None, legs=None):
     extra = _legs_extra(legs)
+    if extra and extra["legs"] == ["coding"]:
+        raise ValueError("coding-only jobs are queued with enqueue_coding(run_id)")
     with _mutation():
+        # One pending GPU job per pod; a coding job for the pod queues
+        # beside it (enqueue_coding) and does not count here.
         queued_or_running = {j["device_id"] for j in _all_jobs()
-                             if j["state"] in ("queued", "running")}
+                             if j["state"] in ("queued", "running") and _needs_gpu(j)}
         added = []
         for d in device_ids:
             if int(d) in queued_or_running:
@@ -632,6 +691,31 @@ def enqueue(session_id, device_ids, models=None, legs=None):
     if added:
         _wake()
     return added
+
+
+def enqueue_coding(session_id, device_id, run_id):
+    """A coding-only job for one pod, reporting to negotiation_coding_run
+    ``run_id``. Queued beside (never instead of) the pod's audio/video job;
+    a run already queued or running is not queued twice."""
+    with _mutation():
+        if any(j.get("run_id") == int(run_id) and j["state"] in ("queued", "running")
+               for j in _all_jobs()):
+            return False
+        _append(session_id, device_id, None, {"legs": ["coding"], "run_id": int(run_id)})
+    _wake()
+    return True
+
+
+def _coding_run_dropped(job):
+    # A coding job cleared from the queue: its run row must not say "queued"
+    # forever. Best effort (the API worker calling clear has the app).
+    try:
+        import app as A
+        with A.app.app_context():
+            import negotiation_coding
+            negotiation_coding.cancel_run(job["run_id"], "queue cleared")
+    except Exception as e:
+        logging.warning("posthoc queue: could not mark coding run %s cancelled: %s", job.get("run_id"), e)
 
 
 def clear_pending():
@@ -644,6 +728,8 @@ def clear_pending():
         for job in _all_jobs():
             if job["state"] == "queued":
                 _remove(job)
+                if job.get("run_id") is not None:
+                    _coding_run_dropped(job)
                 n += 1
         return n
 
