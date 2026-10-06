@@ -346,7 +346,7 @@ torchcodec==0.11.1+cu128
 torchmetrics==1.9.0
 torchvision==0.26.0+cu128
 tqdm==4.68.3
-transformers==4.57.6
+transformers==5.10.1
 triton==3.6.0
 Twisted==26.4.0
 txaio==26.6.1
