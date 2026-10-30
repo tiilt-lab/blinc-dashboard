@@ -31,7 +31,7 @@ APScheduler==3.11.3
 
 # Device websocket (Twisted/autobahn) and post-hoc queue client
 Twisted==26.4.0
-autobahn==26.7.1
+autobahn==26.10.1
 websockets==16.0
 
 # Routes' own imports
