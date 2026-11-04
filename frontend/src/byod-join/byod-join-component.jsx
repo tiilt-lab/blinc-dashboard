@@ -18,6 +18,8 @@ import { SpeakerModel } from "../models/speaker"
 import { ApiService, setClientProcessingKey } from "../services/api-service"
 import { AuthService } from "../services/auth-service"
 import { PolarConnection, isBluetoothSupported } from "../services/polar-hr"
+import { MuseConnection } from "../services/muse-eeg"
+import { ServerClock, localNow, withServerTimes } from "../services/server-clock"
 import fixWebmDuration from "fix-webm-duration"
 import { FEATURE_LABELS, BOX_LABELS, buildChecklist } from "../utilities/checklist"
 import { ensureGetUserMedia } from "../utilities/media"
@@ -45,6 +47,9 @@ const AUDIO_BACKLOG_CAP_BYTES = 96 * 1024 * 1024
 // are empty. A full re-fetch every FULL_REFRESH_EVERY polls picks up rows
 // changed after insertion (speaker metrics attach later).
 const LIVE_POLL_MS = 2000
+// Wearable samples held per stream while the server can't be reached:
+// three minutes of raw blocks or band power for a table of eight.
+const WEARABLE_BACKLOG = 6000
 const FULL_REFRESH_EVERY = 15
 
 /*
@@ -269,6 +274,22 @@ function JoinPage() {
     // Advanced-options toggle: when on, each speaker card on the
     // participants page shows a Polar H10 ID field + pair button.
     const [polarEnabled, setPolarEnabled] = useState(false)
+    // Muse EEG headbands, the same shape as the straps: museInfo drives the
+    // card (electrode contact, battery, sync progress); band-power epochs,
+    // raw signal blocks and sync markers buffer in refs and flush with the
+    // heart rate.
+    const museConns = useRef({})
+    const eegBuffer = useRef([])
+    const rawBuffer = useRef([])
+    const syncBuffer = useRef([])
+    const [museInfo, setMuseInfo] = useState({})
+    const [museEnabled, setMuseEnabled] = useState(false)
+    // The server's clock (server-clock.js). Wearable samples are timed on
+    // the page clock and converted to server time when they are flushed.
+    const serverClock = useRef(null)
+    if (serverClock.current === null) {
+        serverClock.current = new ServerClock({ fetchServerMs: () => sessionService.getServerTimeMs() })
+    }
     // Live video analytics (gaze/emotion/attention) per pod, default on.
     // Mirrored into a ref because the value is read when the video socket's
     // start message is built, long after the join form set it.
@@ -874,6 +895,12 @@ function JoinPage() {
             polarConns.current = {}
             hrBuffer.current = []
             setPolarInfo({})
+            Object.values(museConns.current).forEach((c) => c.close())
+            museConns.current = {}
+            eegBuffer.current = []
+            rawBuffer.current = []
+            syncBuffer.current = []
+            setMuseInfo({})
             // Cartoonify playback: stop the 33ms interval and free every
             // frame object URL (they are never revoked anywhere else).
             if (playbackIntervalRef.current) {
@@ -1278,6 +1305,7 @@ function JoinPage() {
             (f) => f.id !== speaker.id,
         )
         unassignPolarSensor(speaker)
+        unassignMuseSensor(speaker)
         setSpeakers((speakers.current || []).filter((s) => s.id !== speaker.id))
     }
 
@@ -1290,7 +1318,7 @@ function JoinPage() {
         if (!isBluetoothSupported()) return "failed"
         if (polarConns.current[speaker.id]) unassignPolarSensor(speaker)
         const conn = new PolarConnection({
-            onSample: ({ hr, rr, t }) => {
+            onSample: ({ hr, rr, t, beat }) => {
                 // Alias resolved at sample time so a later rename sticks.
                 const cur = (speakers.current || []).find((s) => s.id === speaker.id)
                 hrBuffer.current.push({
@@ -1298,6 +1326,7 @@ function JoinPage() {
                     alias: (cur && cur.alias) || speaker.alias,
                     sensor: (conn.device && conn.device.name) || "",
                     t,
+                    beat,
                     hr,
                     rr,
                 })
@@ -1349,44 +1378,177 @@ function JoinPage() {
         })
     }
 
-    // Drop Polar state that doesn't belong to the roster just returned by a
+    const patchMuse = (id, fn) =>
+        setMuseInfo((p) => (p[id] ? { ...p, [id]: { ...p[id], ...fn(p[id]) } } : p))
+
+    // Pair a Muse headband with a speaker, like a strap: the chooser lists
+    // bands by name ("Muse-1A2B"). Band power streams per electrode per
+    // second; the card shows each electrode's contact so a band that sits
+    // badly is fixed before the discussion rather than found afterwards.
+    const assignMuseSensor = async (speaker) => {
+        if (!isBluetoothSupported()) return "failed"
+        if (museConns.current[speaker.id]) unassignMuseSensor(speaker)
+        let shownAt = -Infinity
+        const conn = new MuseConnection({
+            onEpoch: ({ channel, t, bands, std }) => {
+                const cur = (speakers.current || []).find((s) => s.id === speaker.id)
+                eegBuffer.current.push({
+                    speaker_id: speaker.id,
+                    alias: (cur && cur.alias) || speaker.alias,
+                    sensor: (conn.device && conn.device.name) || "",
+                    channel,
+                    t,
+                    bands,
+                    std,
+                })
+                // The card once a second, not once per electrode.
+                if (t - shownAt < 900) return
+                shownAt = t
+                patchMuse(speaker.id, () => ({ contact: { ...conn.contact }, battery: conn.battery }))
+            },
+            // The raw 256 Hz EEG and 52 Hz accelerometer, a block a second
+            // each, kept apart from the band power (raw_signals.py).
+            onRaw: ({ stream, index, t, data }) => {
+                const cur = (speakers.current || []).find((s) => s.id === speaker.id)
+                rawBuffer.current.push({
+                    speaker_id: speaker.id,
+                    alias: (cur && cur.alias) || speaker.alias,
+                    sensor: (conn.device && conn.device.name) || "",
+                    sensor_kind: "muse",
+                    stream,
+                    index,
+                    t,
+                    data,
+                })
+            },
+            onStatus: (status) => patchMuse(speaker.id, () => ({ status })),
+        })
+        try {
+            const info = await conn.choose()
+            museConns.current[speaker.id] = conn
+            setMuseInfo((p) => ({
+                ...p,
+                [speaker.id]: {
+                    name: info.name,
+                    battery: info.battery,
+                    status: "connected",
+                    contact: {},
+                    sync: null,
+                },
+            }))
+            return "paired"
+        } catch (ex) {
+            conn.close()
+            if (ex && ex.name === "NotFoundError") return "dismissed"
+            console.error("muse connect failed", ex)
+            return "failed"
+        }
+    }
+
+    const unassignMuseSensor = (speaker) => {
+        const conn = museConns.current[speaker.id]
+        if (conn) conn.close()
+        delete museConns.current[speaker.id]
+        setMuseInfo((p) => {
+            const next = { ...p }
+            delete next[speaker.id]
+            return next
+        })
+    }
+
+    // A sync tap (src/server/sync_taps.py): note the press, then for 15 s
+    // every knock the headband's accelerometer feels. The server finds the
+    // same knocks in the pod's audio and measures how far the headband's
+    // timing is off the audio's. Once near the start and once near the end
+    // of a session also gives the drift.
+    const SYNC_WINDOW_MS = 15000
+    const startMuseSync = (speaker) => {
+        const conn = museConns.current[speaker.id]
+        if (!conn) return
+        const syncId = `${speaker.id}-${Date.now().toString(36)}`
+        const base = {
+            sync_id: syncId,
+            speaker_id: speaker.id,
+            sensor_kind: "muse",
+            sensor: (conn.device && conn.device.name) || "",
+        }
+        const ours = (m) => m.sync && m.sync.id === syncId
+        syncBuffer.current.push({ ...base, kind: "prompt", t: localNow() })
+        patchMuse(speaker.id, () => ({ sync: { id: syncId, taps: 0, active: true } }))
+        conn.arm(SYNC_WINDOW_MS, ({ t }) => {
+            syncBuffer.current.push({ ...base, kind: "tap", t })
+            patchMuse(speaker.id, (m) => (ours(m) ? { sync: { ...m.sync, taps: m.sync.taps + 1 } } : {}))
+        })
+        setTimeout(
+            () => patchMuse(speaker.id, (m) => (ours(m) ? { sync: { ...m.sync, active: false } } : {})),
+            SYNC_WINDOW_MS,
+        )
+    }
+
+    // Drop wearable state that doesn't belong to the roster just returned by a
     // join. A device idling on the enrolling page has no sockets open, so it
     // never hears its old session end — without this, straps paired there
     // showed up as still paired in the next session, and their buffered
     // samples would flush into the new session's data. A reconnect to the
     // same session device returns the same speaker ids, so live straps
     // survive it untouched.
-    const prunePolarToRoster = (freshSpeakers) => {
+    const pruneWearablesToRoster = (freshSpeakers) => {
         const ids = new Set((freshSpeakers || []).map((s) => s.id))
-        Object.entries(polarConns.current).forEach(([sid, conn]) => {
-            if (!ids.has(Number(sid))) {
-                conn.close()
-                delete polarConns.current[sid]
-            }
-        })
-        setPolarInfo((p) => {
+        const keepRoster = (p) => {
             const next = {}
             Object.keys(p).forEach((sid) => {
                 if (ids.has(Number(sid))) next[sid] = p[sid]
             })
             return next
-        })
-        hrBuffer.current = hrBuffer.current.filter((s) => ids.has(s.speaker_id))
+        }
+        for (const conns of [polarConns, museConns]) {
+            Object.entries(conns.current).forEach(([sid, conn]) => {
+                if (!ids.has(Number(sid))) {
+                    conn.close()
+                    delete conns.current[sid]
+                }
+            })
+        }
+        setPolarInfo(keepRoster)
+        setMuseInfo(keepRoster)
+        for (const buffer of [hrBuffer, eegBuffer, rawBuffer, syncBuffer]) {
+            buffer.current = buffer.current.filter((s) => ids.has(s.speaker_id))
+        }
     }
 
-    // Ship buffered heart-rate samples every 5 s while joined. Streaming
-    // isn't gated on "Start recording": pre-discussion baseline HR is
+    // Ship buffered wearable samples every 5 s while joined. Streaming
+    // isn't gated on "Start recording": pre-discussion baselines are
     // useful, and timestamps are session-relative server-side either way.
+    // The server clock syncs for as long as samples flow; each batch is
+    // converted with its latest offset (a sample flushed before the first
+    // sync goes without, and the server falls back to the batch skew).
     useEffect(() => {
         if (sessionDevice === null) return undefined
+        const clock = serverClock.current
+        clock.start()
+        // At most `limit` per post (the route's own cap, wearables.py), so a
+        // backlog drains over several flushes rather than being cut off.
+        const flush = (buffer, fields, post, label, limit) => {
+            if (!buffer.current.length || !key.current) return
+            const taken = buffer.current.splice(0, limit)
+            const batch = taken.map((s) => withServerTimes(clock, s, fields))
+            // A network failure puts the batch back for the next flush,
+            // up to a few minutes' worth.
+            post(sessionDevice.id, batch, key.current).catch((ex) => {
+                console.error(label + " flush failed", ex)
+                buffer.current = taken.concat(buffer.current).slice(-WEARABLE_BACKLOG)
+            })
+        }
         const timer = setInterval(() => {
-            if (!hrBuffer.current.length || !key.current) return
-            const batch = hrBuffer.current.splice(0, hrBuffer.current.length)
-            sessionService
-                .postHeartRateForClient(sessionDevice.id, batch, key.current)
-                .catch((ex) => console.error("hr flush failed", ex))
+            flush(hrBuffer, ["t", "beat"], (...a) => sessionService.postHeartRateForClient(...a), "hr", 500)
+            flush(eegBuffer, ["t"], (...a) => sessionService.postEegForClient(...a), "eeg", 2000)
+            flush(rawBuffer, ["t"], (...a) => sessionService.postRawForClient(...a), "raw", 500)
+            flush(syncBuffer, ["t"], (...a) => sessionService.postSyncMarkersForClient(...a), "sync", 50)
         }, 5000)
-        return () => clearInterval(timer)
+        return () => {
+            clearInterval(timer)
+            clock.stop()
+        }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [sessionDevice])
 
@@ -2117,7 +2279,7 @@ function JoinPage() {
                         )
                         const freshSpeakers = SpeakerModel.fromJsonList(jsonObj["speakers"])
                         setSpeakers(freshSpeakers)
-                        prunePolarToRoster(freshSpeakers)
+                        pruneWearablesToRoster(freshSpeakers)
                         // The server assigns "Group A/B/C..." when the name
                         // was left blank — keep the assigned name so backing
                         // out prefills it and rejoining resumes this pod.
@@ -2918,6 +3080,12 @@ function JoinPage() {
             polarInfo={polarInfo}
             assignPolarSensor={assignPolarSensor}
             unassignPolarSensor={unassignPolarSensor}
+            museEnabled={museEnabled}
+            setMuseEnabled={setMuseEnabled}
+            museInfo={museInfo}
+            assignMuseSensor={assignMuseSensor}
+            unassignMuseSensor={unassignMuseSensor}
+            startMuseSync={startMuseSync}
             openForms={openForms}
             selectedSpkrId1={selectedSpkrId1}
             setSelectedSpkrId1={setSelectedSpkrId1}

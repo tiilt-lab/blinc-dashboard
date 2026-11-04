@@ -1,4 +1,5 @@
 import { ApiService } from "./api-service";
+import { localNow } from "./server-clock";
 //import 'rxjs/add/operator/map';
 
 class SessionService {
@@ -238,13 +239,53 @@ class SessionService {
   }
 
   // Heart-rate/RR batch from the join page's Polar straps (Web Bluetooth).
+  // client_now is on the samples' own clock (localNow): the server's
+  // fallback skew for samples sent before the clock synced.
   postHeartRateForClient(sessionDeviceId, samples, processingKey) {
     return this.api.httpRequestCallWithHeader(
       `api/v1/devices/${sessionDeviceId}/heartrate/client`,
       "POST",
-      { client_now: Date.now(), samples },
+      { client_now: localNow(), samples },
       this._clientKeyHeader(processingKey)
     );
+  }
+
+  // EEG band-power batch from the join page's Muse headbands.
+  postEegForClient(sessionDeviceId, samples, processingKey) {
+    return this.api.httpRequestCallWithHeader(
+      `api/v1/devices/${sessionDeviceId}/eeg/client`,
+      "POST",
+      { client_now: localNow(), samples },
+      this._clientKeyHeader(processingKey)
+    );
+  }
+
+  // Raw native-rate blocks, one per stream per second (raw_signals.py).
+  postRawForClient(sessionDeviceId, blocks, processingKey) {
+    return this.api.httpRequestCallWithHeader(
+      `api/v1/devices/${sessionDeviceId}/raw/client`,
+      "POST",
+      { client_now: localNow(), blocks },
+      this._clientKeyHeader(processingKey)
+    );
+  }
+
+  // Sync presses and the taps a sensor felt (sync_taps.py).
+  postSyncMarkersForClient(sessionDeviceId, markers, processingKey) {
+    return this.api.httpRequestCallWithHeader(
+      `api/v1/devices/${sessionDeviceId}/sync/client`,
+      "POST",
+      { client_now: localNow(), markers },
+      this._clientKeyHeader(processingKey)
+    );
+  }
+
+  // The server clock for server-clock.js; the query string keeps any cache
+  // from answering with an old reading.
+  async getServerTimeMs() {
+    const res = await this.api.httpRequestCall(`api/v1/time?n=${Math.random().toString(36).slice(2)}`, "GET", {});
+    if (res.status !== 200) throw new Error("time " + res.status);
+    return (await res.json()).server_ms;
   }
 
   getPodHeartRate(sessionId, sessionDeviceId) {

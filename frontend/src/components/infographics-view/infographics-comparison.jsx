@@ -15,6 +15,7 @@ import { SessionVitals } from "../session-vitals/session-vitals"
 import { SpeakerCardsPanel } from "../speaker-cards/speaker-cards-panel"
 import { JointAttentionPanel } from "../joint-attention/joint-attention-panel"
 import { HeartRatePanel } from "../heart-rate/heart-rate-panel"
+import { EegPanel } from "../eeg/eeg-panel"
 import React, { useState, useEffect, useRef, lazy, Suspense } from "react"
 import { ApiService } from "../../services/api-service"
 
@@ -299,6 +300,37 @@ function AppInfographicsComparison(props) {
             .catch(() => setHrRows([]))
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [isGroup, props.session && props.session.id, props.sessionDevice && props.sessionDevice.id])
+
+    // EEG rows (Muse headbands) and the pod's sync taps, which say how far
+    // each headband's timing sat from the audio. Same reasoning as hrRows:
+    // the section exists only for pods with headband data.
+    const [eegRows, setEegRows] = useState([])
+    const [syncs, setSyncs] = useState([])
+    // The raw native-rate streams the pod has (raw_signals.py), offered as
+    // CSV downloads; signed-in readers only, so a join page gets none.
+    const [rawStreams, setRawStreams] = useState([])
+    useEffect(() => {
+        if (!isGroup) return
+        const base = `api/v1/sessions/${props.session.id}/device/${props.sessionDevice.id}`
+        const api = new ApiService()
+        const get = (path) =>
+            api
+                .httpRequestCall(`${base}/${path}`, "GET", {})
+                .then((r) => (r.status === 200 ? r.json() : []))
+                .then((d) => (Array.isArray(d) ? d : []))
+                .catch(() => [])
+        get("eeg").then((rows) => {
+            setEegRows(rows)
+            // The sync report reads the audio; only worth it with EEG to align.
+            if (rows.length) get("sync").then(setSyncs)
+        })
+        get("raw").then((streams) =>
+            setRawStreams(
+                streams.map((s) => ({ ...s, href: `${api.getEndpoint()}${base}/raw/${s.sensor_kind}/${s.stream}.csv` })),
+            ),
+        )
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isGroup, props.session && props.session.id, props.sessionDevice && props.sessionDevice.id])
     // Array order == the "by question" order.
     const groupSections = !isGroup
         ? []
@@ -511,6 +543,29 @@ function AppInfographicsComparison(props) {
                                     <HeartRatePanel
                                         rows={hrRows}
                                         speakers={props.speakers}
+                                    />
+                                </AppSectionBoxComponent>
+                            ),
+                        },
+                    ]
+                  : []),
+              ...(eegRows.length > 0
+                  ? [
+                        {
+                            key: "eeg",
+                            modality: "Physiological",
+                            node: (
+                                <AppSectionBoxComponent
+                                    type={"w-full"}
+                                    heading={"EEG"}
+                                    badge={"muse headband · exploratory"}
+                                    badgeTone={"amber"}
+                                >
+                                    <EegPanel
+                                        rows={eegRows}
+                                        speakers={props.speakers}
+                                        syncs={syncs}
+                                        rawStreams={rawStreams}
                                     />
                                 </AppSectionBoxComponent>
                             ),

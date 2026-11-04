@@ -3,6 +3,7 @@ import { btnPrimary, btnPrimaryTall, btnSecondaryTall, dlgInput, dlgSelect, dlgP
 import { pageShell, formCard } from "../components/layout-styles"
 import { PodMicRing } from "../components/pod-mic-ring"
 import { Appheader } from "../header/header-component"
+import { EEG_CHANNELS, contactQuality } from "../services/muse-eeg"
 import { VoiceRecorder } from "react-voice-recorder-player"
 import {
     DialogBox,
@@ -308,6 +309,97 @@ function PolarStrapControl({ speaker, supported, enabled, info, onAssign, onUnas
     )
 }
 
+// Optional Muse EEG headband per speaker, shown when the join form's "Add
+// Muse" toggle is on; pairs like a strap (the chooser lists bands by the
+// name printed inside them, e.g. "Muse-1A2B"). Once connected the card shows
+// each electrode's contact (TP9, AF7, AF8, TP10, left ear to right ear), so a
+// band sitting badly is fixed now, and a Sync button: press it, then tap the
+// band twice, firmly, while the room is quiet. The knocks are found again in
+// the pod's audio to check the band's timing (src/server/sync_taps.py).
+const CONTACT_COLOR = { good: "text-emerald-600", fair: "text-amber-500", poor: "text-red-500", none: "text-tiilt-line" }
+
+function MuseControl({ speaker, supported, enabled, info, onAssign, onUnassign, onSync }) {
+    const [notice, setNotice] = useState("")
+    if (!enabled) return null
+    if (!supported) {
+        return (
+            <span className="mx-auto mt-1 max-w-56 font-ahamono text-[11px] leading-snug text-tiilt-muted">
+                EEG pairing isn&apos;t available in this browser — use Chrome
+                or Edge on a laptop or Android device.
+            </span>
+        )
+    }
+    if (!info) {
+        const pair = async () => {
+            setNotice("")
+            const outcome = await onAssign(speaker)
+            if (outcome === "dismissed") {
+                setNotice("No headband picked. Switch the Muse on (its lights pulse while it waits), then try again.")
+            } else if (outcome === "failed") {
+                setNotice(
+                    "Pairing failed — check that Bluetooth is on and the headband isn't connected to the Muse app or another device, then try again.",
+                )
+            }
+        }
+        return (
+            <span className="mx-auto mt-1 flex flex-col items-center gap-1">
+                <button
+                    type="button"
+                    aria-label={`Pair a Muse headband for ${speaker.alias}`}
+                    className="cursor-pointer rounded px-1 font-ahamono text-[11px] text-tiilt-muted hover:text-tiilt-ink"
+                    onClick={pair}
+                >
+                    ◠ pair Muse
+                </button>
+                {notice && <span className="max-w-56 text-[11px] leading-snug text-amber-600">{notice}</span>}
+            </span>
+        )
+    }
+    const live = info.status === "connected"
+    const sync = info.sync
+    return (
+        <span className="mx-auto flex flex-col items-center gap-0.5 font-ahamono text-[11px] text-tiilt-muted">
+            <span className="flex items-center gap-1.5">
+                <span className={live ? "text-tiilt-ink" : "text-tiilt-line"}>◠</span>
+                {EEG_CHANNELS.map((ch) => {
+                    const q = contactQuality((info.contact || {})[ch])
+                    return (
+                        <span key={ch} title={`${ch}: ${q} contact`} className={CONTACT_COLOR[q]}>
+                            ●
+                        </span>
+                    )
+                })}
+                <span>{info.name}</span>
+                {info.battery != null && <span>{info.battery}%</span>}
+                {!live && <span className="text-amber-600">reconnecting…</span>}
+                <button
+                    type="button"
+                    aria-label={`Remove Muse headband for ${speaker.alias}`}
+                    className="cursor-pointer px-1 hover:text-tiilt-ink"
+                    onClick={() => onUnassign(speaker)}
+                >
+                    ✕
+                </button>
+            </span>
+            {sync && sync.active ? (
+                <span className="text-tiilt-ink">
+                    Tap the headband twice, firmly… {sync.taps} felt
+                </span>
+            ) : (
+                <button
+                    type="button"
+                    disabled={!live}
+                    title="Checks the headband's timing against the audio. Press, then tap the band twice while the room is quiet; once at the start and once at the end."
+                    className="cursor-pointer rounded px-1 hover:text-tiilt-ink disabled:cursor-default disabled:opacity-50"
+                    onClick={() => onSync(speaker)}
+                >
+                    {sync ? `sync again (last: ${sync.taps} taps)` : "sync timing"}
+                </button>
+            )}
+        </span>
+    )
+}
+
 // One-tap group sizing on the speaker page (the join form no longer asks):
 // creates N speaker slots at once; each then records or attaches a
 // fingerprint. Hidden as soon as any slot exists.
@@ -567,6 +659,27 @@ function ByodJoinPage(props) {
                                                             sensor.
                                                         </p>
                                                     </div>
+                                                    <div>
+                                                        <Toggle
+                                                            label="Add Muse EEG headbands"
+                                                            checked={!!props.museEnabled}
+                                                            onChange={() =>
+                                                                props.setMuseEnabled(
+                                                                    !props.museEnabled,
+                                                                )
+                                                            }
+                                                        />
+                                                        <p className="mt-1 text-xs text-tiilt-muted">
+                                                            Pair each headband
+                                                            from its wearer&apos;s
+                                                            card, check that all
+                                                            four contact dots are
+                                                            green, then press
+                                                            &quot;sync timing&quot;
+                                                            and tap the band
+                                                            twice.
+                                                        </p>
+                                                    </div>
                                                 </div>
                                             </div>
                                         </div>
@@ -713,6 +826,15 @@ function ByodJoinPage(props) {
                                                                 enabled={props.polarEnabled}
                                                                 onAssign={props.assignPolarSensor}
                                                                 onUnassign={props.unassignPolarSensor}
+                                                            />
+                                                            <MuseControl
+                                                                speaker={speaker}
+                                                                supported={props.bluetoothSupported}
+                                                                info={(props.museInfo || {})[speaker.id]}
+                                                                enabled={props.museEnabled}
+                                                                onAssign={props.assignMuseSensor}
+                                                                onUnassign={props.unassignMuseSensor}
+                                                                onSync={props.startMuseSync}
                                                             />
                                                         </div>
                                                         <div className="flex flex-none flex-col items-center gap-0.5">

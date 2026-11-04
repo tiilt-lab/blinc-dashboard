@@ -1265,57 +1265,6 @@ def get_gaze_overlays(session_id, session_device_id, **kwargs):
     return json_response({'records': records})
 
 
-@api_routes.route('/api/v1/devices/<int:device_id>/heartrate/client', methods=['POST'])
-@wrappers.verify_device_read_access
-def add_device_heart_rate(device_id, **kwargs):
-    # Heart-rate/RR ingest from the byod join page (Polar straps over Web
-    # Bluetooth). Samples carry the client's epoch-ms clock; convert to the
-    # session-relative seconds every other metric table uses, correcting for
-    # client/server clock skew via the batch's client_now.
-    session_device = kwargs.get('session_device') or database.get_session_devices(id=device_id)
-    content = request.get_json() or {}
-    samples = content.get('samples', [])
-    if not isinstance(samples, list) or not samples:
-        return json_response({'added': 0})
-    if len(samples) > 500:
-        samples = samples[:500]
-    parent_session = database.get_sessions(id=session_device.session_id)
-    session_start_ms = parent_session.creation_date.timestamp() * 1000.0
-    try:
-        skew_ms = datetime.now(timezone.utc).replace(tzinfo=None).timestamp() * 1000.0 - float(content.get('client_now'))
-    except (TypeError, ValueError):
-        skew_ms = 0.0
-    rows = []
-    for s in samples:
-        try:
-            hr = int(s['hr'])
-            t_ms = float(s['t']) + skew_ms
-        except (KeyError, TypeError, ValueError):
-            continue
-        rr = s.get('rr') or []
-        rr_text = ','.join(str(int(v)) for v in rr if isinstance(v, (int, float)))[:64]
-        rows.append({
-            'speaker_id': s.get('speaker_id'),
-            # sanitize('') returns None — slicing it raised a TypeError that
-            # aborted the whole batch (up to 500 samples) on one bad sample.
-            'speaker_alias': (sanitize(str(s.get('alias', ''))) or 'Unknown')[:64],
-            'sensor_name': (sanitize(str(s.get('sensor', ''))) or '')[:64],
-            'time_stamp': max(0, int((t_ms - session_start_ms) / 1000.0)),
-            'heart_rate': hr,
-            'rr_ms': rr_text,
-        })
-    added = database.add_speaker_hr_metrics_batch(session_device.id, rows) if rows else []
-    return json_response({'added': len(added)})
-
-
-@api_routes.route('/api/v1/sessions/<int:session_id>/device/<int:session_device_id>/heartrate', methods=['GET'])
-@wrappers.verify_device_read_access
-def get_pod_heart_rate(session_id, session_device_id, **kwargs):
-    # Same open-read trust level as the joint_attention endpoint below.
-    rows = database.get_speaker_hr_metrics(session_device_id=session_device_id)
-    return json_response([row.json() for row in rows])
-
-
 @api_routes.route('/api/v1/sessions/<int:session_id>/device/<int:session_device_id>/joint_attention', methods=['GET'])
 @wrappers.verify_device_read_access
 def get_pod_joint_attention(session_id, session_device_id, **kwargs):

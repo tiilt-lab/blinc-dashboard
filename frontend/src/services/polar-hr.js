@@ -5,6 +5,15 @@
 //
 // Web Bluetooth exists in Chrome/Edge (desktop + Android) over HTTPS only —
 // callers should gate UI on isBluetoothSupported().
+//
+// Timing: a notification is stamped when it arrives (t), but the strap only
+// sends about once a second, so a beat can be up to a second old by then.
+// The RR intervals themselves are the strap's clock: they add up to the
+// time between beats, and sample-clock.js fits that running sum against
+// the arrivals to say when each notification's last beat ended (beat).
+
+import { DeviceClock } from "./sample-clock"
+import { localNow } from "./server-clock"
 
 const HEART_RATE_SERVICE = "heart_rate"
 const HEART_RATE_MEASUREMENT = "heart_rate_measurement"
@@ -15,7 +24,8 @@ export const isBluetoothSupported = () =>
     typeof navigator !== "undefined" && !!navigator.bluetooth
 
 // Parse a Heart Rate Measurement characteristic value (GATT 0x2A37).
-// Returns { hr: bpm, rr: [ms, ...] }.
+// Returns { hr: bpm, rr: [ms, ...], rr1024: [raw 1/1024 s, ...] } — rr is
+// rounded for storage, rr1024 kept exact so summing it does not drift.
 export const parseHeartRateMeasurement = (dataView) => {
     const flags = dataView.getUint8(0)
     let offset = 1
@@ -29,17 +39,51 @@ export const parseHeartRateMeasurement = (dataView) => {
     }
     if (flags & 0x08) offset += 2 // energy expended field, skip
     const rr = []
+    const rr1024 = []
     if (flags & 0x10) {
         for (; offset + 1 < dataView.byteLength; offset += 2) {
             // RR is in 1/1024ths of a second per the spec.
-            rr.push(Math.round((dataView.getUint16(offset, true) * 1000) / 1024))
+            const raw = dataView.getUint16(offset, true)
+            rr1024.push(raw)
+            rr.push(Math.round((raw * 1000) / 1024))
         }
     }
-    return { hr, rr }
+    return { hr, rr, rr1024 }
 }
 
-// One managed strap connection. onSample({hr, rr, t}) fires per notification
-// (H10: ~1/s); onStatus("connecting"|"connected"|"disconnected", info) tracks
+// A strap sends about once a second while connected; a longer silence may
+// have lost beats, which would put the running RR sum behind for good.
+const BEAT_GAP_MS = 3000
+
+// The strap's beat timeline: the running sum of its RR intervals, fitted
+// to notification arrivals (page clock). add() returns when the
+// notification's last beat ended, or null when it carried no beats.
+export class BeatClock {
+    constructor() {
+        // A notification may hold beats from up to ~1 s before it was sent.
+        this.clock = new DeviceClock({ resetMs: 1500, maxDelayMs: 1200 })
+        this.reset()
+    }
+
+    reset() {
+        this.clock.reset()
+        this.sumMs = 0
+        this.lastArrival = null
+    }
+
+    add(rr1024, arrival) {
+        if (this.lastArrival != null && arrival - this.lastArrival > BEAT_GAP_MS) this.reset()
+        this.lastArrival = arrival
+        if (!rr1024 || !rr1024.length) return null
+        for (const raw of rr1024) this.sumMs += (raw * 1000) / 1024
+        this.clock.add(this.sumMs, arrival)
+        return this.clock.toLocal(this.sumMs)
+    }
+}
+
+// One managed strap connection. onSample({hr, rr, t, beat}) fires per
+// notification (H10: ~1/s), t its arrival and beat its last beat (both on
+// the page clock, localNow; beat null without beats); onStatus("connecting"|"connected"|"disconnected", info) tracks
 // the connection lifecycle, including auto-reconnect attempts.
 export class PolarConnection {
     constructor({ onSample, onStatus }) {
@@ -50,9 +94,11 @@ export class PolarConnection {
         this.battery = null
         this.closed = false
         this._reconnectTimer = null
+        this.beats = new BeatClock()
         this._notifyHandler = (event) => {
-            const { hr, rr } = parseHeartRateMeasurement(event.target.value)
-            this.onSample({ hr, rr, t: Date.now() })
+            const t = localNow()
+            const { hr, rr, rr1024 } = parseHeartRateMeasurement(event.target.value)
+            this.onSample({ hr, rr, t, beat: this.beats.add(rr1024, t) })
         }
         this._disconnectHandler = () => {
             this.characteristic = null
@@ -93,6 +139,7 @@ export class PolarConnection {
     async _attach() {
         if (this.closed || !this.device) return
         this.onStatus("connecting")
+        this.beats.reset()
         const server = await this.device.gatt.connect()
         const service = await server.getPrimaryService(HEART_RATE_SERVICE)
         this.characteristic = await service.getCharacteristic(HEART_RATE_MEASUREMENT)

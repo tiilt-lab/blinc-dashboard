@@ -8,6 +8,7 @@ import math
 import hashlib
 import secrets
 import passcode_words
+import physio_time
 import logging
 
 # Tables
@@ -30,6 +31,9 @@ from tables.speaker import Speaker
 from tables.speaker_transcript_metrics import SpeakerTranscriptMetrics
 from tables.speaker_video_metrics import SpeakerVideoMetrics
 from tables.speaker_hr_metrics import SpeakerHrMetrics
+from tables.speaker_eeg_metrics import SpeakerEegMetrics
+from tables.sync_marker import SyncMarker
+from tables.wearable_raw_block import WearableRawBlock
 from tables.llm_feedback_report import LLMFeedbackReport
 from tables.llm_question_answer import LLMQuestionAnswer
 from tables.rater import Rater
@@ -339,15 +343,90 @@ def get_speaker_hr_metrics(id=None, session_id=None, session_device_id=None, spe
 
 def add_speaker_hr_metrics_batch(session_device_id, samples):
     # samples: list of dicts with speaker_id, speaker_alias, sensor_name,
-    # time_stamp, heart_rate, rr_ms. One commit per POST batch, not per row.
+    # time_stamp, heart_rate, rr_ms and optionally time_ms, beat_ms. One
+    # commit per POST batch, not per row.
     rows = []
     for s in samples:
         row = SpeakerHrMetrics(session_device_id, s['speaker_id'], s['speaker_alias'],
-                               s['sensor_name'], s['time_stamp'], s['heart_rate'], s['rr_ms'])
+                               s['sensor_name'], s['time_stamp'], s['heart_rate'], s['rr_ms'],
+                               time_ms=s.get('time_ms'), beat_ms=s.get('beat_ms'))
         db.session.add(row)
         rows.append(row)
     db.session.commit()
     return rows
+
+# -------------------------
+# EEG Metrics (Muse headbands streamed from the join page)
+# -------------------------
+
+def get_speaker_eeg_metrics(session_device_id):
+    return db.session.query(SpeakerEegMetrics)         .filter(SpeakerEegMetrics.session_device_id == session_device_id)         .order_by(SpeakerEegMetrics.time_ms.asc(), SpeakerEegMetrics.id.asc()).all()
+
+def add_speaker_eeg_metrics_batch(session_device_id, samples):
+    # samples: dicts with speaker_id, speaker_alias, sensor_name, time_stamp,
+    # time_ms, channel, bands {delta..gamma}, std_uv. One commit per batch.
+    rows = []
+    for s in samples:
+        row = SpeakerEegMetrics(session_device_id, s['speaker_id'], s['speaker_alias'], s['sensor_name'],
+                                s['time_stamp'], s['time_ms'], s['channel'], s['bands'], s['std_uv'])
+        db.session.add(row)
+        rows.append(row)
+    db.session.commit()
+    return rows
+
+# -------------------------
+# Sync markers (sync taps, sync_taps.py)
+# -------------------------
+
+def get_sync_markers(session_device_id):
+    return db.session.query(SyncMarker)         .filter(SyncMarker.session_device_id == session_device_id)         .order_by(SyncMarker.time_ms.asc(), SyncMarker.id.asc()).all()
+
+def add_sync_markers_batch(session_device_id, markers):
+    # markers: dicts with speaker_id, sync_id, kind, source, sensor_kind,
+    # sensor_name, time_ms.
+    rows = []
+    for m in markers:
+        row = SyncMarker(session_device_id, m['speaker_id'], m['sync_id'], m['kind'], m['source'],
+                         m['sensor_kind'], m['sensor_name'], m['time_ms'])
+        db.session.add(row)
+        rows.append(row)
+    db.session.commit()
+    return rows
+
+# -------------------------
+# Raw wearable signals (native-rate blocks, raw_signals.py)
+# -------------------------
+
+def add_raw_blocks_batch(session_device_id, blocks):
+    # blocks: dicts with the WearableRawBlock columns but the pod.
+    rows = []
+    for b in blocks:
+        row = WearableRawBlock(session_device_id, b['speaker_id'], b['speaker_alias'], b['sensor_kind'],
+                               b['sensor_name'], b['stream'], b['channels'], b['rate'], b['scale'], b['unit'],
+                               b['sample_index'], b['time_ms'], b['n_samples'], b['n_missing'], b['data'])
+        db.session.add(row)
+        rows.append(row)
+    db.session.commit()
+    return rows
+
+def query_raw_blocks(session_device_id, sensor_kind, stream, speaker_id=None):
+    # A query, not a list: an hour of one headband's EEG is 3,600 blocks,
+    # read in pages by the export (yield_per).
+    query = db.session.query(WearableRawBlock).filter(
+        WearableRawBlock.session_device_id == session_device_id,
+        WearableRawBlock.sensor_kind == sensor_kind,
+        WearableRawBlock.stream == stream)
+    if speaker_id is not None:
+        query = query.filter(WearableRawBlock.speaker_id == speaker_id)
+    return query.order_by(WearableRawBlock.speaker_id.asc(), WearableRawBlock.time_ms.asc(),
+                          WearableRawBlock.id.asc())
+
+def raw_block_summary(session_device_id):
+    # [(sensor_kind, stream, blocks)] for the streams the pod has.
+    return db.session.query(WearableRawBlock.sensor_kind, WearableRawBlock.stream,
+                            db.func.count(WearableRawBlock.id)) \
+        .filter(WearableRawBlock.session_device_id == session_device_id) \
+        .group_by(WearableRawBlock.sensor_kind, WearableRawBlock.stream).all()
 
 # -------------------------
 # Get Speaker, Video and Transcript Metrics by session
@@ -810,6 +889,10 @@ def session_device_has_data(session_device_id):
         return True
     if db.session.query(SpeakerHrMetrics.id).filter(SpeakerHrMetrics.session_device_id == session_device_id).first():
         return True
+    if db.session.query(SpeakerEegMetrics.id).filter(SpeakerEegMetrics.session_device_id == session_device_id).first():
+        return True
+    if db.session.query(WearableRawBlock.id).filter(WearableRawBlock.session_device_id == session_device_id).first():
+        return True
     return False
 
 def delete_session_device(session_device_id):
@@ -927,6 +1010,8 @@ def delete_speaker(session_device_id, speaker_id):
         db.session.query(Transcript).filter(Transcript.session_device_id == session_device_id, Transcript.speaker_id == speaker_id).first()
         or db.session.query(SpeakerTranscriptMetrics).filter(SpeakerTranscriptMetrics.speaker_id == speaker_id).first()
         or db.session.query(SpeakerHrMetrics).filter(SpeakerHrMetrics.speaker_id == speaker_id).first()
+        or db.session.query(SpeakerEegMetrics).filter(SpeakerEegMetrics.speaker_id == speaker_id).first()
+        or db.session.query(WearableRawBlock.id).filter(WearableRawBlock.speaker_id == speaker_id).first()
     )
     if has_data:
         return False, 'This speaker already has recorded data.'
@@ -987,7 +1072,8 @@ def _as_int(value):
 def add_transcript(session_device_id, start_time, length, transcript, question, direction, emotional_tone, analytic_thinking, clout, authenticity, certainty, topic_id ,tag, speaker_id, voice_features=None, keywords=None):
     # keywords: optional [{'word','keyword','similarity'}] stored in the same
     # commit as the transcript (was one commit per keyword usage).
-    transcript = Transcript(session_device_id, _as_int(start_time), _as_int(length), transcript, question, direction, emotional_tone, analytic_thinking, clout, authenticity, certainty, topic_id, tag, speaker_id, voice_features=voice_features)
+    transcript = Transcript(session_device_id, _as_int(start_time), _as_int(length), transcript, question, direction, emotional_tone, analytic_thinking, clout, authenticity, certainty, topic_id, tag, speaker_id, voice_features=voice_features,
+                            start_ms=physio_time.seconds_to_ms(start_time), length_ms=physio_time.seconds_to_ms(length))
     for k in keywords or []:
         transcript.keywords.append(KeywordUsage(None, k['word'], k['keyword'], k['similarity']))
     db.session.add(transcript)
@@ -1042,7 +1128,9 @@ def publish_transcripts_batch(session_device_id, rows):
             t = Transcript(session_device_id, start, length, r['transcript'], bool(r.get('question', False)),
                            r.get('direction', -1), r.get('emotional_tone', 0), r.get('analytic_thinking', 0),
                            r.get('clout', 0), r.get('authenticity', 0), r.get('certainty', 0), r.get('topic_id', -1),
-                           r.get('speaker_tag'), r.get('speaker_id', -1), voice_features=r.get('voice_features'))
+                           r.get('speaker_tag'), r.get('speaker_id', -1), voice_features=r.get('voice_features'),
+                           start_ms=physio_time.seconds_to_ms(r['start_time']),
+                           length_ms=physio_time.seconds_to_ms(r['length']))
             for k in r.get('keywords') or []:
                 t.keywords.append(KeywordUsage(None, k['word'], k['keyword'], k['similarity']))
             db.session.add(t)
