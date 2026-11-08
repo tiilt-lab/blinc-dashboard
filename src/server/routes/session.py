@@ -6,8 +6,7 @@ from utility import sanitize, string_to_bool, json_response, safe_name
 from tables.session_device import SessionDevice
 from redis_helper import RedisSessions, RedisPosthocTicket
 from tables.session import Session
-from utility import batch_video_metrics,batch_transcript_metrics,batch_transcript_video_metrics,synthesized_transcript_video_metrics_by_window
-from metrics_windowing import fmt_start_time
+from utility import synthesized_transcript_video_metrics_by_window
 from app import socketio, limiter
 import logging
 import database
@@ -19,15 +18,16 @@ import passcode_rules
 import coding_schemes as coding_scheme_lib
 import watchers
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from handlers import session_handler
 import wrappers
 import folder_access
 import authz
 import socketio_helper
+import exports
 import posthoc_state
 import posthoc_queue
 import redis_sync
-import csv
 import io
 import os
 import base64
@@ -486,11 +486,11 @@ def _transcode_to_h264(src, dst):
     return result
 
 
-def _fixed_video_path(session_device_id):
-    # Returns the remuxed (duration+cues fixed) copy, creating it on demand.
-    # The remux writes to a temp name and renames atomically, and concurrent
-    # requests for the same device serialize on a lock — so a request can never
-    # be served a partially written file.
+def _fixed_video_target(session_device_id):
+    # Where a pod's remuxed copy lives (or will), without building it: None
+    # for a pod with no recording, else a namespace of the originals, the
+    # cache path and its segments sidecar. The download dialog polls this to
+    # tell "ready" from "preparing" without blocking on ffmpeg.
     originals = _find_original_videos(session_device_id)
     if not originals:
         return None
@@ -510,16 +510,37 @@ def _fixed_video_path(session_device_id):
     # video drops the disconnect gaps between segments, so mapping transcript
     # time to video time needs each segment's true length (see _video_segments).
     seg_json = fixed + '.segments.json'
+    return SimpleNamespace(originals=originals, cache_dir=cache_dir, src_ext=src_ext,
+                           transcode=transcode, ext=ext, total_bytes=total_bytes,
+                           fixed=fixed, seg_json=seg_json)
+
+
+def _fixed_video_ready(target):
     # A single segment maps fine without the sidecar (one open-ended segment),
     # but a multi-segment video needs the real per-segment durations to skip the
     # disconnect gaps — so if its remux was cached before the sidecar existed,
-    # fall through and regenerate both.
-    if os.path.exists(fixed) and (len(originals) == 1 or os.path.exists(seg_json)):
+    # it is not ready and gets regenerated.
+    return os.path.exists(target.fixed) and (
+        len(target.originals) == 1 or os.path.exists(target.seg_json))
+
+
+def _fixed_video_path(session_device_id):
+    # Returns the remuxed (duration+cues fixed) copy, creating it on demand.
+    # The remux writes to a temp name and renames atomically, and concurrent
+    # requests for the same device serialize on a lock — so a request can never
+    # be served a partially written file.
+    target = _fixed_video_target(session_device_id)
+    if target is None:
+        return None
+    originals, cache_dir, src_ext = target.originals, target.cache_dir, target.src_ext
+    transcode, ext, total_bytes = target.transcode, target.ext, target.total_bytes
+    fixed, seg_json = target.fixed, target.seg_json
+    if _fixed_video_ready(target):
         return fixed
     with redis_sync.lock('remux_lock:%d' % int(session_device_id),
                          _REMUX_LOCK_TTL, _REMUX_LOCK_WAIT) as held:
-        # a concurrent request already produced it (same condition as above)
-        if os.path.exists(fixed) and (len(originals) == 1 or os.path.exists(seg_json)):
+        # a concurrent request already produced it
+        if _fixed_video_ready(target):
             return fixed
         if not held:
             # Another worker is still remuxing this device after the full
@@ -617,7 +638,7 @@ def _video_start_offset(session_id, session_device_id):
         return 0.0
 
 
-def _video_segments(session_id, session_device_id):
+def _video_segments(session_id, session_device_id, prepare=True):
     # The recording as the player sees it: one entry per segment, in play order,
     #   {'start': session-relative time of the segment's FIRST frame,
     #    'video_start': where it begins in the concatenated video (gaps removed),
@@ -631,7 +652,13 @@ def _video_segments(session_id, session_device_id):
     if not originals or session_model is None:
         return []
     # Ensure the remux + duration sidecar exist, then read the durations.
-    fixed = _fixed_video_path(session_device_id)
+    # prepare=False (the data export) never starts an ffmpeg run: without a
+    # ready remux the durations fall back to the next segment's start below.
+    if prepare:
+        fixed = _fixed_video_path(session_device_id)
+    else:
+        target = _fixed_video_target(session_device_id)
+        fixed = target.fixed if target is not None and _fixed_video_ready(target) else None
     durations = []
     if fixed:
         try:
@@ -1647,104 +1674,15 @@ def _metrics_export_response(si, json_payload, format):
 @wrappers.verify_session_read_access
 def export_session_transcript_metrics(session_id,windowsize, format, **kwargs):
     si = io.StringIO()
-    field_names = None  
-    fwrite = None 
-    session_devices = database.get_session_devices(session_id=session_id)
-    all_participants_metrics = {}
-    if windowsize == 0:
-        field_names = ['Device ID', 'Device Name', 'Start Time', 'Transcript Id','Transcript', 'Keywords', 'Keywords Detected', 'Similarity', 'Analytic Thinking', 'Authenticity', 'Certainty',
-                    'Clout', 'Emotional Tone', 'Direction',  'participation_score', 'internal_cohesion', 'responsivity', 'social_impact','newness','communication_density','Word Count', 'Speaker Tag', 'Speaker ID', 'Topic ID']
-        fwrite = csv.DictWriter(si, fieldnames = field_names)
-        fwrite.writeheader()
-        for session_device in session_devices:
-            transcripts = database.get_all_transcript_metrics_by_session(session_device_id=session_device.id)
-            keywords = database.get_keyword_usages(session_device_id=session_device.id)
-            # Index once: the per-transcript list scan was O(transcripts x
-            # keyword_usages) per export.
-            keywords_by_transcript = {}
-            for keyword in keywords:
-                keywords_by_transcript.setdefault(keyword.transcript_id, []).append(keyword)
-            for t, sm in transcripts:
-                transcript_keywords = keywords_by_transcript.get(t.id, [])
-                fwrite.writerow({'Device ID':session_device.id,
-                    'Device Name':session_device.name,
-                    'Start Time': fmt_start_time(t.start_time),
-                    'Transcript Id': int(t.id),
-                    'Transcript':t.transcript,
-                    'Keywords': ', '.join([keyword.keyword for keyword in transcript_keywords]),
-                    'Keywords Detected': ', '.join([keyword.word for keyword in transcript_keywords]),
-                    'Similarity': ', '.join([str(round((1-keyword.similarity)*100,3)) for keyword in transcript_keywords]),
-                    'Analytic Thinking': int(t.analytic_thinking_value),
-                    'Authenticity': int(t.authenticity_value),
-                    'Certainty': int(t.certainty_value),
-                    'Clout': int(t.clout_value),
-                    'Emotional Tone': int(t.emotional_tone_value),
-                    'participation_score': int(float(sm.participation_score)*100),
-                    'internal_cohesion':  int(float(sm.internal_cohesion)*100),
-                    'responsivity':  int(float(sm.responsivity)*100),
-                    'social_impact':  int(float(sm.social_impact)*100),
-                    'newness':  int(float(sm.newness)*100), 
-                    'communication_density':  int(float(sm.communication_density)*100),
-                    'Word Count': int(t.word_count),
-                    'Speaker Tag': t.speaker_tag,
-                    'Speaker ID': int(t.speaker_id),
-                    'Topic ID': int(t.topic_id)
-                    })
-    else:
-        field_names = ['Group ID', 'Group Name', 'Time Range (s)','Transcript', 'Keywords', 'Keywords Detected', 'Similarity', 'Analytic Thinking', 'Authenticity', 'Certainty',
-                    'Clout', 'Emotional Tone', 'Direction',  'participation_score', 'internal_cohesion', 'responsivity', 'social_impact','newness','Word Count', 'Speaker Tag', 'Speaker ID', 'Topic ID']
-        fwrite = csv.DictWriter(si, fieldnames = field_names)
-        fwrite.writeheader()     
-        for session_device in session_devices:
-            keywords = database.get_keyword_usages(session_device_id=session_device.id)
-            speakers = database.get_speakers(session_device_id=session_device.id)
-            for speaker in speakers:
-                transcriptSpeakerMetric = database.get_all_transcript_metrics_by_session(session_device_id=session_device.id,speaker_id=speaker.id)
-                speaker_data = batch_transcript_metrics(transcriptSpeakerMetric,windowsize,fwrite,speaker,session_device,keywords,format)
-                if format == 'json':
-                    all_participants_metrics[speaker.alias] = [dict(zip(field_names, row)) for row in speaker_data]
-                    # all_participants_metrics.extend(speaker_data)
-                        
-
+    all_participants_metrics = exports.write_transcript_metrics(si, session_id, windowsize, format)
     return _metrics_export_response(si, all_participants_metrics, format)
 
 @api_routes.route('/api/v1/sessions/<int:session_id>/exportvideometrics/<int:windowsize>/<string:format>',methods=['GET'])
 @wrappers.verify_login(public=True)
 @wrappers.verify_session_read_access
 def export_session_video_metrics(session_id, windowsize, format, **kwargs):
-    field_names = None
-    fwrite = None  
     si = io.StringIO()
-    session_devices = database.get_session_devices(session_id=session_id)
-    all_participants_metrics = {}
-    if windowsize == 0:
-        field_names = ['Device ID', 'Device Name', 'Start Time', 'Facial Emotion', 'Object Focus On', 'Attention Level', 'Speaker Tag']
-        fwrite = csv.DictWriter(si, fieldnames = field_names)
-        fwrite.writeheader()  
-        for session_device in session_devices:
-            videoMetrics = database.get_video_metrics_by_session(session_device_id=session_device.id)
-            for v in videoMetrics:
-                fwrite.writerow({'Device ID':session_device.id,
-                    'Device Name':session_device.name,
-                    'Start Time': fmt_start_time(v.time_stamp),
-                    'Facial Emotion': str(v.facial_emotion),
-                    'Object Focus On': str(v.object_on_focus),
-                    'Attention Level': int(v.attention_level),
-                    'Speaker Tag': v.student_username
-                    })
-
-    else:
-        field_names = ['Group ID', 'Group Name', 'Time Range (s)', 'Facial Emotion', 'Object Focus On', 'Attention Level','Attention Rate',"Attention Class", 'Speaker Tag']
-        fwrite = csv.DictWriter(si, fieldnames = field_names)
-        fwrite.writeheader()
-        for session_device in session_devices:
-            speakers = database.get_speakers(session_device_id=session_device.id)
-            for speaker in speakers:
-                videoMetrics = database.get_speaker_video_metrics(session_device_id=session_device.id,student_username=speaker.alias)
-                speaker_data = batch_video_metrics(videoMetrics,windowsize,fwrite,speaker,session_device,format)
-                if format == 'json':
-                    all_participants_metrics[speaker.alias] = [dict(zip(field_names, row)) for row in speaker_data]
-                    # all_participants_metrics.extend(speaker_data)  
+    all_participants_metrics = exports.write_video_metrics(si, session_id, windowsize, format)
     return _metrics_export_response(si, all_participants_metrics, format)
 
 @api_routes.route('/api/v1/sessions/<int:session_id>/exporttranscriptvideometrics/<int:windowsize>/<string:format>',methods=['GET'])
@@ -1752,70 +1690,7 @@ def export_session_video_metrics(session_id, windowsize, format, **kwargs):
 @wrappers.verify_session_read_access
 def export_session_transcript_video_metrics(session_id,windowsize, format, **kwargs):
     si = io.StringIO()
-    field_names = None
-    fwrite = None
-    session_devices = database.get_session_devices(session_id=session_id)
-    all_participants_metrics = {}
-    if windowsize == 0:
-        field_names = ['Device ID', 'Device Name', 'Start Time', 'Transcript', 'Keywords', 'Keywords Detected', 'Similarity', 'Analytic Thinking', 'Authenticity', 'Certainty',
-                    'Clout', 'Emotional Tone', 'Direction',  'participation_score', 'internal_cohesion', 'responsivity', 'social_impact','newness','communication_density',
-                    'Word Count', 'Facial Emotion', 'Object Focus On', 'Attention Level', 'Speaker Tag', 'Speaker ID', 'Topic ID']
-        fwrite = csv.DictWriter(si, fieldnames = field_names)
-        fwrite.writeheader()
-        for session_device in session_devices:
-            all_metrics = database.get_all_metrics_by_session(session_device_id=session_device.id)
-            keywords = database.get_keyword_usages(session_device_id=session_device.id)
-            # Index once: the per-transcript list scan was O(transcripts x
-            # keyword_usages) per export.
-            keywords_by_transcript = {}
-            for keyword in keywords:
-                keywords_by_transcript.setdefault(keyword.transcript_id, []).append(keyword)
-            for t,sm,vm in all_metrics:
-                transcript_keywords = keywords_by_transcript.get(t.id, [])
-                fwrite.writerow({'Device ID':session_device.id,
-                    'Device Name':session_device.name,
-                    'Start Time': fmt_start_time(t.start_time),
-                    'Transcript':t.transcript,
-                    'Keywords': ', '.join([keyword.keyword for keyword in transcript_keywords]),
-                    'Keywords Detected': ', '.join([keyword.word for keyword in transcript_keywords]),
-                    'Similarity': ', '.join([str(round((1-keyword.similarity)*100,3)) for keyword in transcript_keywords]),
-                    'Analytic Thinking': int(t.analytic_thinking_value),
-                    'Authenticity': int(t.authenticity_value),
-                    'Certainty': int(t.certainty_value),
-                    'Clout': int(t.clout_value),
-                    'Emotional Tone': int(t.emotional_tone_value),
-                    'participation_score': int(float(sm.participation_score)*100),
-                    'internal_cohesion':  int(float(sm.internal_cohesion)*100),
-                    'responsivity':  int(float(sm.responsivity)*100),
-                    'social_impact':  int(float(sm.social_impact)*100),
-                    'newness':  int(float(sm.newness)*100), 
-                    'communication_density':  int(float(sm.communication_density)*100),
-                    'Word Count': int(t.word_count),
-                    'Facial Emotion': str(vm.facial_emotion),
-                    'Object Focus On': str(vm.object_on_focus),
-                    'Attention Level': int(vm.attention_level),
-                    'Speaker Tag': t.speaker_tag,
-                    'Speaker ID': int(t.speaker_id),
-                    'Topic ID': int(t.topic_id)
-                    })
-    else:
-        field_names = ['Group ID', 'Group Name', 'Time Range (s)', 'Transcript', 'Keywords', 'Keywords Detected', 'Similarity', 'Analytic Thinking', 'Authenticity', 'Certainty',
-                    'Clout', 'Emotional Tone',  'participation_score', 'internal_cohesion', 'responsivity', 'social_impact','newness',
-                    'Word Count', 'Facial Emotion', 'Object Focus On', 'Attention Level','Attention Rate',"Attention Class", 'Speaker Tag', 'Speaker ID', 'Topic ID']
-        fwrite = csv.DictWriter(si, fieldnames = field_names)
-        fwrite.writeheader()       
-        for session_device in session_devices:
-            keywords = database.get_keyword_usages(session_device_id=session_device.id)
-            speakers = database.get_speakers(session_device_id=session_device.id)
-            for speaker in speakers:
-                videoMetrics = database.get_speaker_video_metrics(session_device_id=session_device.id,student_username=speaker.alias)
-                transcriptSpeakerMetric = database.get_all_transcript_metrics_by_session(session_device_id=session_device.id,speaker_id=speaker.id)
-                speaker_data = batch_transcript_video_metrics(transcriptSpeakerMetric,videoMetrics,windowsize,fwrite,speaker,session_device,keywords,format)
-                if format == 'json':
-                    all_participants_metrics[speaker.alias] = [dict(zip(field_names, row)) for row in speaker_data]
-                    # all_participants_metrics.extend(speaker_data) 
-                   
-
+    all_participants_metrics = exports.write_transcript_video_metrics(si, session_id, windowsize, format)
     return _metrics_export_response(si, all_participants_metrics, format)
 
 # Open by design: the anonymous student-dashboard and expert-rating flows

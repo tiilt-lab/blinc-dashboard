@@ -873,6 +873,17 @@ function ByodJoinPage(props) {
                                                         comes back.
                                                     </div>
                                                 )}
+                                                {/* The resting baseline and group game, run
+                                                    full screen before the discussion
+                                                    (baseline-overlay.jsx). */}
+                                                {props.showBaselineButton && (
+                                                    <button
+                                                        className={dlgPrimary + " w-full"}
+                                                        onClick={props.startBaseline}
+                                                    >
+                                                        Record baseline
+                                                    </button>
+                                                )}
                                                 </div>
                                             )}
                                             {props.joinwith === "Audio" && (

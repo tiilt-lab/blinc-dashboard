@@ -421,52 +421,6 @@ function PodsOverviewComponent(props) {
     navigator.clipboard.writeText(getJoinLink());
   };
 
-  const exportSessionMetricsData = (type,windowsize,format) => {
-    let fetchData = null;
-    if (type === "audiometrics") {
-      fetchData = new SessionService().downloadSessionTranscriptMetrics(session.id, session.title,windowsize,format);
-    } else if (type === "videometrics") {
-      fetchData = new SessionService().downloadSessionVideoMetrics(session.id, session.title,windowsize,format);
-    } else if (type === "transcriptvideometrics") {
-      fetchData = new SessionService().downloadSessionTranscriptVideoMetrics(session.id, session.title,windowsize,format);
-    }
-    if (fetchData != null) {
-      fetchData.then(
-        (response) => {
-          if (response.status === 200) {
-            response.text().then((Data) => {
-              const anchor = document.createElement("a");
-              anchor.href =
-                "data:attachment/csv;charset=utf-8," + encodeURI(Data);
-              let extension = format === "csv" ? ".csv" : ".json"  
-              anchor.download = session.title + extension;
-              anchor.click();
-             
-              //return true;
-              /* {const resp = response.json()
-                    resp.then() }*/
-            });
-          } else {
-            alert("Failed to download transcript metrics.");
-          }
-        },
-        (apierror) => {
-          console.error(
-            "pods-overview-components func: exportSessionTranscriptMetrics 1 ",
-            apierror
-          );
-          alert("Failed to download transcript metrics.");
-        }
-      );
-    }
-  };
-
- 
-
-  const downloadData = (windowsize, datatype,format) => {
-    exportSessionMetricsData(datatype,windowsize,format);
-  }
-
   const closeDialog = () => {
     setCurrentForm("");
   };
@@ -557,7 +511,6 @@ function PodsOverviewComponent(props) {
       devices={devices}
       goToSpeakerMetrics={goToSpeakerMetrics}
       openDownloadOptionDialog={openDownloadOptionDialog}
-      downloadData={downloadData}
     />
   );
 }
