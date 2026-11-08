@@ -18,6 +18,8 @@ import { SpeakerModel } from "../models/speaker"
 import { ApiService, setClientProcessingKey } from "../services/api-service"
 import { AuthService } from "../services/auth-service"
 import { PolarConnection, isBluetoothSupported } from "../services/polar-hr"
+import { MarkerQueue, describeSensors } from "../services/event-markers"
+import { useBaseline, BaselineOverlay } from "./baseline-overlay"
 import fixWebmDuration from "fix-webm-duration"
 import { FEATURE_LABELS, BOX_LABELS, buildChecklist } from "../utilities/checklist"
 import { ensureGetUserMedia } from "../utilities/media"
@@ -266,6 +268,30 @@ function JoinPage() {
     const polarConns = useRef({})
     const hrBuffer = useRef([])
     const [polarInfo, setPolarInfo] = useState({})
+
+    // Event markers (services/event-markers.js): Join Session, Start
+    // recording and each baseline step, timed on press and queued until the
+    // pod's device and key exist and the server has them.
+    const markerDevice = useRef(null)
+    const eventMarkers = useRef(null)
+    if (eventMarkers.current === null) {
+        eventMarkers.current = new MarkerQueue({
+            send: async (batch) => {
+                if (!markerDevice.current || !key.current) return false
+                const r = await sessionService.postEventMarkersForClient(markerDevice.current.id, batch, key.current)
+                return r.status === 200
+            },
+        })
+    }
+    // The wearables this laptop has connected, for the marker's sensors column.
+    const markEvent = (label) => {
+        const sensors = Object.entries(polarConns.current).map(([sid, conn]) => {
+            const speaker = (speakers.current || []).find((s) => String(s.id) === String(sid))
+            return { kind: "polar", name: (conn.device && conn.device.name) || "", alias: speaker && speaker.alias }
+        })
+        eventMarkers.current.mark(label, { sensors: describeSensors(sensors) })
+    }
+    const baseline = useBaseline(markEvent)
     // Advanced-options toggle: when on, each speaker card on the
     // participants page shows a Polar H10 ID field + pair button.
     const [polarEnabled, setPolarEnabled] = useState(false)
@@ -1374,6 +1400,18 @@ function JoinPage() {
         hrBuffer.current = hrBuffer.current.filter((s) => ids.has(s.speaker_id))
     }
 
+    useEffect(() => {
+        markerDevice.current = sessionDevice
+        if (sessionDevice !== null) eventMarkers.current.flush()
+    }, [sessionDevice])
+    useEffect(() => () => eventMarkers.current.stop(), [])
+    // Recording stopped mid-baseline (ended here or by the teacher): close
+    // the full-screen view so the page underneath can be seen.
+    useEffect(() => {
+        if (!armed && baseline.step) baseline.stop()
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [armed])
+
     // Ship buffered heart-rate samples every 5 s while joined. Streaming
     // isn't gated on "Start recording": pre-discussion baseline HR is
     // useful, and timestamps are session-relative server-side either way.
@@ -1422,6 +1460,7 @@ function JoinPage() {
             setCurrentForm("JoinError")
             return
         }
+        markEvent("session_joined")
         ending.current = false
         replayDone.current = false
         everOpened.current = false
@@ -2946,8 +2985,11 @@ function JoinPage() {
                 // Resume inside the tap itself — this is the user gesture
                 // iOS requires before an AudioContext may run.
                 audioContext.current?.resume?.().catch(() => {})
+                markEvent("recording_started")
                 startRecordingGate()
             }}
+            showBaselineButton={armed && !baseline.step && !baseline.done}
+            startBaseline={baseline.start}
             requestEndRecording={() => setCurrentForm("ConfirmEndRec")}
             confirmEndRecording={endRecording}
             loadSpeakerMetrics={loadSpeakerMetrics}
@@ -3041,6 +3083,7 @@ function JoinPage() {
                 </button>
             </div>
         )}
+        <BaselineOverlay baseline={baseline} />
         </>
     )
 }

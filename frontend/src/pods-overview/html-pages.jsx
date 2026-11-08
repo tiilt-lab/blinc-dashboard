@@ -3,6 +3,7 @@ import { SessionModel } from "../models/session"
 import { dlgHeading, dlgBody, dlgSelect, dlgPrimary, dlgCancel, dlgDanger, btnPrimary, btnPrimarySm, btnDangerOutlineSm, btnSecondary } from "../components/dialog-styles"
 import { Appheader } from "../header/header-component"
 import { GenericDialogBox } from "../dialog/dialog-component"
+import { SessionExportDialog } from "../components/session-export/session-export-dialog"
 import { AppSessionToolbar } from "../session-toolbar/session-toolbar-component"
 import { SessionTabs } from "../components/session-tabs"
 import { SkeletonRows } from "../components/skeleton"
@@ -899,65 +900,11 @@ function PodsOverviewPages(props) {
                     </div>
                 )) ||
                     (props.currentForm === "selectdownloadoption" && (
-                        <div className={dlgBody}>
-                            <div className={dlgHeading}>
-                                Select the Data to Download:
-                            </div>
-                            <select id="format" aria-label="Download format" className={dlgSelect}>
-                                <option value="">Select format</option>
-                                <option value="csv">CSV</option>
-                                <option value="json">JSON</option>
-                            </select>
-                            <select id="windowsize" aria-label="Window size in seconds" className={dlgSelect}>
-                                <option value="">
-                                    Select window size in secs
-                                </option>
-                                <option value="0">0</option>
-                                <option value="10">10</option>
-                                <option value="20">20</option>
-                                <option value="30">30</option>
-                                <option value="40">40</option>
-                                <option value="50">50</option>
-                                <option value="60">60</option>
-                            </select>
-                            <select id="datatype" aria-label="Data to download" className={dlgSelect}>
-                                <option value="">
-                                    Select data to download
-                                </option>
-                                <option value="audiometrics">
-                                    Transcript Metrics
-                                </option>
-                                <option value="videometrics">
-                                    Video Metrics
-                                </option>
-                                <option value="transcriptvideometrics">
-                                    Transcript-Video Metrics
-                                </option>
-                            </select>
-
-                            <button
-                                className={dlgPrimary}
-                                onClick={() => {
-                                    props.downloadData(
-                                        document.getElementById("windowsize")
-                                            .value,
-                                        document.getElementById("datatype")
-                                            .value,
-                                        document.getElementById("format").value,
-                                    )
-                                }}
-                            >
-                                {" "}
-                                Confirm
-                            </button>
-                            <button
-                                className={dlgCancel}
-                                onClick={props.closeDialog}
-                            >
-                                {" "}
-                                Cancel
-                            </button>
-                        </div>
+                        <SessionExportDialog
+                            session={props.session}
+                            enriched={props.enriched}
+                            onClose={props.closeDialog}
+                        />
                     )) ||
                     (props.currentForm === "ConfirmEnd" && (
                         <div className={dlgBody}>

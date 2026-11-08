@@ -39,6 +39,7 @@ from tables.survey_response import SurveyResponse
 from tables.negotiation_coding_run import NegotiationCodingRun
 from tables.negotiation_code import NegotiationCode
 from tables.coding_scheme import CodingScheme
+from tables.event_marker import EventMarker
 
 # Saves changes made to database (models)
 def save_changes():
@@ -2388,3 +2389,30 @@ def get_negotiation_codes(run_id):
 def session_device_transcript_count(session_device_id):
     return db.session.query(func.count(Transcript.id)) \
         .filter(Transcript.session_device_id == session_device_id).scalar() or 0
+
+def add_event_markers(session_device_id, rows):
+    # rows: dicts of marker_id, label, time_stamp, time_ms, sensors, detail.
+    # A marker_id the pod already has (a batch re-sent after a lost reply)
+    # is skipped, so a press is stored once. One commit per batch.
+    seen = {m for (m,) in db.session.query(EventMarker.marker_id)
+            .filter(EventMarker.session_device_id == session_device_id,
+                    EventMarker.marker_id.in_([r['marker_id'] for r in rows])).all()}
+    added = []
+    for r in rows:
+        if r['marker_id'] in seen:
+            continue
+        seen.add(r['marker_id'])
+        marker = EventMarker(session_device_id, r['marker_id'], r['label'], r['time_stamp'], r['time_ms'],
+                             r.get('sensors'), r.get('detail'))
+        db.session.add(marker)
+        added.append(marker)
+    db.session.commit()
+    return added
+
+def get_event_markers(session_id=None, session_device_id=None):
+    query = db.session.query(EventMarker)
+    if session_id is not None:
+        query = query.join(SessionDevice, EventMarker.session_device_id == SessionDevice.id)             .filter(SessionDevice.session_id == session_id)
+    if session_device_id is not None:
+        query = query.filter(EventMarker.session_device_id == session_device_id)
+    return query.order_by(EventMarker.time_ms.asc(), EventMarker.id.asc()).all()
