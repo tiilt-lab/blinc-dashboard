@@ -241,6 +241,15 @@ class SessionService {
   // Heart-rate/RR batch from the join page's Polar straps (Web Bluetooth).
   // client_now is on the samples' own clock (localNow): the server's
   // fallback skew for samples sent before the clock synced.
+  postEventMarkersForClient(sessionDeviceId, markers, processingKey) {
+    return this.api.httpRequestCallWithHeader(
+      `api/v1/devices/${sessionDeviceId}/markers/client`,
+      "POST",
+      { client_now: localNow(), markers },
+      this._clientKeyHeader(processingKey)
+    );
+  }
+
   postHeartRateForClient(sessionDeviceId, samples, processingKey) {
     return this.api.httpRequestCallWithHeader(
       `api/v1/devices/${sessionDeviceId}/heartrate/client`,

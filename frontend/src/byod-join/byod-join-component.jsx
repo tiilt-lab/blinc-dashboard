@@ -18,6 +18,8 @@ import { SpeakerModel } from "../models/speaker"
 import { ApiService, setClientProcessingKey } from "../services/api-service"
 import { AuthService } from "../services/auth-service"
 import { PolarConnection, isBluetoothSupported } from "../services/polar-hr"
+import { MarkerQueue, describeSensors } from "../services/event-markers"
+import { useBaseline, BaselineOverlay } from "./baseline-overlay"
 import { MuseConnection } from "../services/muse-eeg"
 import { ServerClock, localNow, withServerTimes } from "../services/server-clock"
 import fixWebmDuration from "fix-webm-duration"
@@ -290,6 +292,36 @@ function JoinPage() {
     if (serverClock.current === null) {
         serverClock.current = new ServerClock({ fetchServerMs: () => sessionService.getServerTimeMs() })
     }
+
+    // Event markers (services/event-markers.js): Join Session, Start
+    // recording and each baseline step, timed on press on the page clock,
+    // sent with server time once the clock has synced, and queued until the
+    // pod's device and key exist and the server has them.
+    const markerDevice = useRef(null)
+    const eventMarkers = useRef(null)
+    if (eventMarkers.current === null) {
+        eventMarkers.current = new MarkerQueue({
+            now: localNow,
+            toServer: (t) => serverClock.current.toServer(t),
+            send: async (batch) => {
+                if (!markerDevice.current || !key.current) return false
+                const r = await sessionService.postEventMarkersForClient(markerDevice.current.id, batch, key.current)
+                return r.status === 200
+            },
+        })
+    }
+    // The wearables this laptop has connected, for the marker's sensors column.
+    const markEvent = (label) => {
+        const sensors = []
+        for (const [kind, conns] of [["polar", polarConns], ["muse", museConns]]) {
+            Object.entries(conns.current).forEach(([sid, conn]) => {
+                const speaker = (speakers.current || []).find((s) => String(s.id) === String(sid))
+                sensors.push({ kind, name: (conn.device && conn.device.name) || "", alias: speaker && speaker.alias })
+            })
+        }
+        eventMarkers.current.mark(label, { sensors: describeSensors(sensors) })
+    }
+    const baseline = useBaseline(markEvent)
     // Live video analytics (gaze/emotion/attention) per pod, default on.
     // Mirrored into a ref because the value is read when the video socket's
     // start message is built, long after the join form set it.
@@ -1516,6 +1548,18 @@ function JoinPage() {
         }
     }
 
+    useEffect(() => {
+        markerDevice.current = sessionDevice
+        if (sessionDevice !== null) eventMarkers.current.flush()
+    }, [sessionDevice])
+    useEffect(() => () => eventMarkers.current.stop(), [])
+    // Recording stopped mid-baseline (ended here or by the teacher): close
+    // the full-screen view so the page underneath can be seen.
+    useEffect(() => {
+        if (!armed && baseline.step) baseline.stop()
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [armed])
+
     // Ship buffered wearable samples every 5 s while joined. Streaming
     // isn't gated on "Start recording": pre-discussion baselines are
     // useful, and timestamps are session-relative server-side either way.
@@ -1584,6 +1628,7 @@ function JoinPage() {
             setCurrentForm("JoinError")
             return
         }
+        markEvent("session_joined")
         ending.current = false
         replayDone.current = false
         everOpened.current = false
@@ -3114,8 +3159,11 @@ function JoinPage() {
                 // Resume inside the tap itself — this is the user gesture
                 // iOS requires before an AudioContext may run.
                 audioContext.current?.resume?.().catch(() => {})
+                markEvent("recording_started")
                 startRecordingGate()
             }}
+            showBaselineButton={armed && !baseline.step && !baseline.done}
+            startBaseline={baseline.start}
             requestEndRecording={() => setCurrentForm("ConfirmEndRec")}
             confirmEndRecording={endRecording}
             loadSpeakerMetrics={loadSpeakerMetrics}
@@ -3209,6 +3257,7 @@ function JoinPage() {
                 </button>
             </div>
         )}
+        <BaselineOverlay baseline={baseline} />
         </>
     )
 }
