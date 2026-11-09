@@ -63,7 +63,7 @@ OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
 # Preference order: first locally-available model wins. 32b for quality,
 # 14b as the always-there fallback (32b may be mid-pull / evicted).
 OLLAMA_MODELS = [m.strip() for m in
-                 os.getenv("OLLAMA_MODELS", "qwen3:32b,qwen3:14b").split(",")
+                 os.getenv("OLLAMA_MODELS", "qwen38-27b:latest").split(",")
                  if m.strip()]
 
 
