@@ -55,7 +55,7 @@ dill==0.4.1
 diskcache==5.6.3
 distro==1.9.0
 dlib==20.0.1
-dnspython==2.8.0
+dnspython==2.9.2
 docstring_parser==0.18.0
 einops==0.8.2
 email-validator==2.3.0
