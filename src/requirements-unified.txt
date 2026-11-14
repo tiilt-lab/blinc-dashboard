@@ -210,7 +210,7 @@ openai==2.44.0
 openai-harmony==0.0.8
 opencv-python==5.0.0.93
 opencv-python-headless==5.0.0.93
-opentelemetry-api==1.43.0
+opentelemetry-api==1.45.2
 opentelemetry-exporter-otlp==1.43.0
 opentelemetry-exporter-otlp-proto-common==1.43.0
 opentelemetry-exporter-otlp-proto-grpc==1.43.0
