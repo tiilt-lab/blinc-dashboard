@@ -127,6 +127,15 @@ def _client(env, user=None):
     return client
 
 
+
+def test_an_e4_button_press_is_a_marker(env, world):
+    resp = _post(env, world.a, [{"marker_id": "b1", "label": "wristband_button", "server_t": START_MS + 61_250,
+                                 "sensors": "e4:Empatica E4 Ab12 (Ana)", "detail": "band_tick=1202"}])
+    assert resp.get_json() == {"added": 1}
+    (m,) = env.database.get_event_markers(session_device_id=world.a.id)
+    assert (m.label, m.time_ms, m.sensors, m.detail) == (
+        "wristband_button", 61250, "e4:Empatica E4 Ab12 (Ana)", "band_tick=1202")
+
 def test_markers_land_on_the_session_clock(env, world, monkeypatch):
     # A synced page sends server_t; an unsynced one only t, corrected by the
     # batch skew (server now - client_now): here the laptop runs 2 s slow.

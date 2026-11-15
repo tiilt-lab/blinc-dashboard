@@ -21,6 +21,7 @@ import { PolarConnection, isBluetoothSupported } from "../services/polar-hr"
 import { MarkerQueue, describeSensors } from "../services/event-markers"
 import { useBaseline, BaselineOverlay } from "./baseline-overlay"
 import { MuseConnection } from "../services/muse-eeg"
+import { E4Connection } from "../services/e4-wristband"
 import { ServerClock, localNow, withServerTimes } from "../services/server-clock"
 import fixWebmDuration from "fix-webm-duration"
 import { FEATURE_LABELS, BOX_LABELS, buildChecklist } from "../utilities/checklist"
@@ -286,6 +287,13 @@ function JoinPage() {
     const syncBuffer = useRef([])
     const [museInfo, setMuseInfo] = useState({})
     const [museEnabled, setMuseEnabled] = useState(false)
+    // Empatica E4 wristbands, the same shape again: raw blocks share
+    // rawBuffer; e4Info drives the card (skin conductance, temperature, a
+    // flash when the band's button is pressed). A press is also an event
+    // marker, timed by the band.
+    const e4Conns = useRef({})
+    const [e4Info, setE4Info] = useState({})
+    const [e4Enabled, setE4Enabled] = useState(false)
     // The server's clock (server-clock.js). Wearable samples are timed on
     // the page clock and converted to server time when they are flushed.
     const serverClock = useRef(null)
@@ -313,10 +321,11 @@ function JoinPage() {
     // The wearables this laptop has connected, for the marker's sensors column.
     const markEvent = (label) => {
         const sensors = []
-        for (const [kind, conns] of [["polar", polarConns], ["muse", museConns]]) {
+        for (const [kind, conns] of [["polar", polarConns], ["muse", museConns], ["e4", e4Conns]]) {
             Object.entries(conns.current).forEach(([sid, conn]) => {
                 const speaker = (speakers.current || []).find((s) => String(s.id) === String(sid))
-                sensors.push({ kind, name: (conn.device && conn.device.name) || "", alias: speaker && speaker.alias })
+                const name = kind === "e4" ? conn.label : (conn.device && conn.device.name) || ""
+                sensors.push({ kind, name, alias: speaker && speaker.alias })
             })
         }
         eventMarkers.current.mark(label, { sensors: describeSensors(sensors) })
@@ -933,6 +942,9 @@ function JoinPage() {
             rawBuffer.current = []
             syncBuffer.current = []
             setMuseInfo({})
+            Object.values(e4Conns.current).forEach((c) => c.close())
+            e4Conns.current = {}
+            setE4Info({})
             // Cartoonify playback: stop the 33ms interval and free every
             // frame object URL (they are never revoked anywhere else).
             if (playbackIntervalRef.current) {
@@ -1338,6 +1350,7 @@ function JoinPage() {
         )
         unassignPolarSensor(speaker)
         unassignMuseSensor(speaker)
+        unassignE4Sensor(speaker)
         setSpeakers((speakers.current || []).filter((s) => s.id !== speaker.id))
     }
 
@@ -1488,6 +1501,79 @@ function JoinPage() {
         })
     }
 
+    const patchE4 = (id, fn) =>
+        setE4Info((p) => (p[id] ? { ...p, [id]: { ...p[id], ...fn(p[id]) } } : p))
+
+    // Pair an Empatica E4 wristband with a speaker. Every band is listed as
+    // "Empatica E4", so the card asks for a press of the band's button: the
+    // card that flashes is the one that band is paired to. The four raw
+    // streams go up as blocks (raw_signals.py); each press is an event
+    // marker at the band's own time of the press.
+    const E4_PRESS_FLASH_MS = 4000
+    const assignE4Sensor = async (speaker) => {
+        if (!isBluetoothSupported()) return "failed"
+        if (e4Conns.current[speaker.id]) unassignE4Sensor(speaker)
+        const wearer = () => {
+            const cur = (speakers.current || []).find((s) => s.id === speaker.id)
+            return (cur && cur.alias) || speaker.alias
+        }
+        const conn = new E4Connection({
+            onRaw: ({ stream, index, t, data }) => {
+                rawBuffer.current.push({
+                    speaker_id: speaker.id,
+                    alias: wearer(),
+                    sensor: conn.label,
+                    sensor_kind: "e4",
+                    stream,
+                    index,
+                    t,
+                    data,
+                })
+                // The card once a second (one temperature block a second).
+                if (stream === "temp") patchE4(speaker.id, () => ({ ...conn.latest, lost: conn.lost }))
+            },
+            onButton: ({ t, tick }) => {
+                eventMarkers.current.mark("wristband_button", {
+                    sensors: describeSensors([{ kind: "e4", name: conn.label, alias: wearer() }]),
+                    detail: `band_tick=${tick}`,
+                    t,
+                })
+                const pressedAt = Date.now()
+                patchE4(speaker.id, (m) => ({ pressedAt, presses: (m.presses || 0) + 1 }))
+                setTimeout(
+                    () => patchE4(speaker.id, (m) => (m.pressedAt === pressedAt ? { pressedAt: null } : {})),
+                    E4_PRESS_FLASH_MS,
+                )
+            },
+            onStatus: (status) => patchE4(speaker.id, () => ({ status })),
+        })
+        try {
+            const info = await conn.choose()
+            e4Conns.current[speaker.id] = conn
+            setE4Info((p) => ({
+                ...p,
+                [speaker.id]: { name: info.name, status: "connected", eda: null, temp: null, lost: 0, presses: 0, pressedAt: null },
+            }))
+            return "paired"
+        } catch (ex) {
+            conn.close()
+            if (ex && ex.name === "NotFoundError") return "dismissed"
+            console.error("e4 connect failed", ex)
+            return "failed"
+        }
+    }
+
+    const unassignE4Sensor = (speaker) => {
+        const conn = e4Conns.current[speaker.id]
+        if (conn) conn.close()
+        delete e4Conns.current[speaker.id]
+        setE4Info((p) => {
+            const next = { ...p }
+            delete next[speaker.id]
+            return next
+        })
+    }
+
     // A sync tap (src/server/sync_taps.py): note the press, then for 15 s
     // every knock the headband's accelerometer feels. The server finds the
     // same knocks in the pod's audio and measures how far the headband's
@@ -1533,7 +1619,7 @@ function JoinPage() {
             })
             return next
         }
-        for (const conns of [polarConns, museConns]) {
+        for (const conns of [polarConns, museConns, e4Conns]) {
             Object.entries(conns.current).forEach(([sid, conn]) => {
                 if (!ids.has(Number(sid))) {
                     conn.close()
@@ -1543,6 +1629,7 @@ function JoinPage() {
         }
         setPolarInfo(keepRoster)
         setMuseInfo(keepRoster)
+        setE4Info(keepRoster)
         for (const buffer of [hrBuffer, eegBuffer, rawBuffer, syncBuffer]) {
             buffer.current = buffer.current.filter((s) => ids.has(s.speaker_id))
         }
@@ -3131,6 +3218,11 @@ function JoinPage() {
             assignMuseSensor={assignMuseSensor}
             unassignMuseSensor={unassignMuseSensor}
             startMuseSync={startMuseSync}
+            e4Enabled={e4Enabled}
+            setE4Enabled={setE4Enabled}
+            e4Info={e4Info}
+            assignE4Sensor={assignE4Sensor}
+            unassignE4Sensor={unassignE4Sensor}
             openForms={openForms}
             selectedSpkrId1={selectedSpkrId1}
             setSelectedSpkrId1={setSelectedSpkrId1}

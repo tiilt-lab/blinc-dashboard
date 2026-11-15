@@ -20,6 +20,10 @@
 
 import { DeviceClock, SequenceCounter } from "./sample-clock"
 import { localNow } from "./server-clock"
+import { RawBlockAssembler, encodeBlock } from "./raw-blocks"
+
+// Shared with the E4 wristband; re-exported for existing imports.
+export { RAW_MISSING, RawBlockAssembler, encodeBlock } from "./raw-blocks"
 
 const MUSE_SERVICE = 0xfe8d
 const uuid = (n) => `273e00${n}-4c4d-454d-96be-f03bac821358`
@@ -210,61 +214,6 @@ export class EpochAssembler {
         const newest = Math.floor((firstIndex + samples.length - 1) / this.size)
         for (const e of this.open.keys()) if (e < newest - 1) this.open.delete(e)
     }
-}
-
-// Marks a lost sample in a raw block (raw_signals.MISSING).
-export const RAW_MISSING = -32768
-
-// Collects every channel of one stream into 1-second blocks by sample
-// index: onBlock(firstIndex, Int16Array) with the counts interleaved by
-// sample (s0c0, s0c1, ..., s1c0, ...). A block goes once every channel has
-// filled it, or with RAW_MISSING in the gaps once two newer blocks have
-// started (a lost packet), so every second that saw any data is kept and
-// no sample shifts.
-export class RawBlockAssembler {
-    constructor(onBlock, { channels, size }) {
-        this.onBlock = onBlock
-        this.channels = channels
-        this.size = size
-        this.open = new Map()
-    }
-
-    push(channel, firstIndex, counts) {
-        const per = this.size * this.channels
-        for (let k = 0; k < counts.length; k++) {
-            const idx = firstIndex + k
-            const b = Math.floor(idx / this.size)
-            let block = this.open.get(b)
-            if (!block) {
-                block = { data: new Int16Array(per).fill(RAW_MISSING), filled: 0 }
-                this.open.set(b, block)
-            }
-            block.data[(idx - b * this.size) * this.channels + channel] = counts[k]
-            block.filled++
-            if (block.filled === per) {
-                this.open.delete(b)
-                this.onBlock(b * this.size, block.data)
-            }
-        }
-        const newest = Math.floor((firstIndex + counts.length - 1) / this.size)
-        for (const [b, block] of [...this.open.entries()].sort((x, y) => x[0] - y[0])) {
-            if (b >= newest - 1) break
-            this.open.delete(b)
-            this.onBlock(b * this.size, block.data)
-        }
-    }
-}
-
-// Int16Array -> base64 of its little-endian bytes (what the server decodes).
-export const encodeBlock = (data) => {
-    const bytes = new Uint8Array(data.length * 2)
-    const view = new DataView(bytes.buffer)
-    data.forEach((v, i) => view.setInt16(i * 2, v, true))
-    let text = ""
-    for (let i = 0; i < bytes.length; i += 0x8000) {
-        text += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000))
-    }
-    return btoa(text)
 }
 
 // One managed headband. onEpoch({channel, t, bands, std}) fires per

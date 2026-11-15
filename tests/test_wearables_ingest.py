@@ -203,3 +203,60 @@ def test_raw_blocks_store_counts_and_export_at_the_native_rate(env, pod):
         acc_lines = resp.get_data(as_text=True).splitlines()
     assert len(acc_lines) == 1 + 52
     assert acc_lines[2] == "6,Cy,Muse-9F,105,4029.2,0.006104,-0.012207,1.000001"
+
+
+def _block32(counts):
+    return base64.b64encode(struct.pack("<%di" % len(counts), *counts)).decode()
+
+
+def test_e4_wristband_blocks_export_in_their_units(env, pod):
+    # e4-wristband.js: BVP as green/red differences (64 Hz), EDA as int32
+    # counts (4 Hz), skin temperature (4 Hz) and the accelerometer (32 Hz).
+    base = {"speaker_id": 8, "alias": "Di", "sensor": "Empatica E4 Ab12", "sensor_kind": "e4"}
+    bvp1 = [1, -1] * 64
+    bvp1[6] = -32768  # sample 3, green: lost
+    bvp2 = [2, 0] * 64
+    bvp3 = [5, 5] * 64  # after a reconnect: index starts over
+    eda = [2486882, -2147483648, 1000000, 0]
+    body = {"blocks": [
+        dict(base, stream="bvp", index=0, server_t=START_MS + 10_000.0, data=_block(bvp1)),
+        dict(base, stream="bvp", index=64, server_t=START_MS + 11_000.0, data=_block(bvp2)),
+        dict(base, stream="bvp", index=0, server_t=START_MS + 20_000.0, data=_block(bvp3)),
+        dict(base, stream="eda", index=0, server_t=START_MS + 10_000.0, data=_block32(eda)),
+        dict(base, stream="eda", index=4, server_t=START_MS + 11_000.0, data=_block([1, 2, 3, 4])),  # int16: wrong size
+        dict(base, stream="temp", index=0, server_t=START_MS + 10_000.0, data=_block([15281] * 4)),
+        dict(base, stream="acc", index=0, server_t=START_MS + 10_000.0, data=_block([64, -32, 0] * 32)),
+    ]}
+    assert _post(env, env.routes.add_device_raw_blocks, body, device_id=pod.id) == {"added": 6}
+
+    def export(stream):
+        with env.flask_app.test_request_context("/x"):
+            resp = env.routes.export_pod_raw(session_id=pod.session_id, session_device_id=pod.id,
+                                             sensor_kind="e4", stream=stream)
+            return resp.get_data(as_text=True).splitlines()
+
+    with env.flask_app.test_request_context("/x"):
+        summary = env.routes.get_pod_raw_summary(session_id=pod.session_id, session_device_id=pod.id).get_json()
+    assert sorted((r["stream"], r["seconds"], r["rate"]) for r in summary) == [
+        ("acc", 1, 32), ("bvp", 3, 64), ("eda", 1, 4), ("temp", 1, 4)]
+
+    bvp = export("bvp")
+    assert bvp[0] == "speaker_id,speaker_alias,sensor_name,sample_index,time_ms,green_delta,red_delta,green,red"
+    assert len(bvp) == 1 + 3 * 64
+    assert bvp[1] == "8,Di,Empatica E4 Ab12,0,10000.0,1,-1,1,-1"
+    assert bvp[4].split(",")[3:] == ["3", "10046.9", "", "-1", "3", "-4"], "a lost sample adds nothing"
+    assert bvp[64].split(",")[-2:] == ["63", "-64"]
+    assert bvp[65].split(",")[3:] == ["64", "11000.0", "2", "0", "65", "-64"], "sums carry into the next block"
+    assert bvp[129].split(",")[3:] == ["0", "20000.0", "5", "5", "5", "5"], "a reconnect starts the sums over"
+
+    assert export("eda") == [
+        "speaker_id,speaker_alias,sensor_name,sample_index,time_ms,eda_raw,eda_uS",
+        "8,Di,Empatica E4 Ab12,0,10000.0,2486882,0.40211",
+        "8,Di,Empatica E4 Ab12,1,10250.0,,",
+        "8,Di,Empatica E4 Ab12,2,10500.0,1000000,1.0",
+        "8,Di,Empatica E4 Ab12,3,10750.0,0,",
+    ]
+    temp = export("temp")
+    assert temp[0].endswith(",temp_C") and temp[1].endswith(",30.08")
+    acc = export("acc")
+    assert acc[0].endswith(",x_g,y_g,z_g") and acc[1].endswith(",1.0,-0.5,0.0") and len(acc) == 1 + 32

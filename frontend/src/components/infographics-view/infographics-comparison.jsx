@@ -16,6 +16,7 @@ import { SpeakerCardsPanel } from "../speaker-cards/speaker-cards-panel"
 import { JointAttentionPanel } from "../joint-attention/joint-attention-panel"
 import { HeartRatePanel } from "../heart-rate/heart-rate-panel"
 import { EegPanel } from "../eeg/eeg-panel"
+import { E4Panel } from "../e4/e4-panel"
 import React, { useState, useEffect, useRef, lazy, Suspense } from "react"
 import { ApiService } from "../../services/api-service"
 
@@ -565,7 +566,28 @@ function AppInfographicsComparison(props) {
                                         rows={eegRows}
                                         speakers={props.speakers}
                                         syncs={syncs}
-                                        rawStreams={rawStreams}
+                                        rawStreams={rawStreams.filter((s) => s.sensor_kind === "muse")}
+                                    />
+                                </AppSectionBoxComponent>
+                            ),
+                        },
+                    ]
+                  : []),
+              ...(rawStreams.some((s) => s.sensor_kind === "e4")
+                  ? [
+                        {
+                            key: "wristband",
+                            modality: "Physiological",
+                            node: (
+                                <AppSectionBoxComponent
+                                    type={"w-full"}
+                                    heading={"Wristband signals"}
+                                    badge={"empatica e4 · raw data"}
+                                    badgeTone={"teal"}
+                                >
+                                    <E4Panel
+                                        streams={rawStreams.filter((s) => s.sensor_kind === "e4")}
+                                        markersHref={`${new ApiService().getEndpoint()}api/v1/sessions/${props.session.id}/markers.csv`}
                                     />
                                 </AppSectionBoxComponent>
                             ),

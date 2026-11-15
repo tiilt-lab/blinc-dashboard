@@ -400,6 +400,84 @@ function MuseControl({ speaker, supported, enabled, info, onAssign, onUnassign, 
     )
 }
 
+// Optional Empatica E4 wristband per speaker, shown when the join form's
+// "Add E4" toggle is on. Every band is listed in the chooser as "Empatica
+// E4", so once one is paired the card asks for a press of that band's
+// button: the card that flashes is the one it belongs to (a band on the
+// wrong wrist is swapped now, not found in the data later). Once connected
+// it shows skin conductance and temperature, which read implausibly when
+// the band sits loose. Each press is also saved as an event marker.
+function E4Control({ speaker, supported, enabled, info, onAssign, onUnassign }) {
+    const [notice, setNotice] = useState("")
+    if (!enabled) return null
+    if (!supported) {
+        return (
+            <span className="mx-auto mt-1 max-w-56 font-ahamono text-[11px] leading-snug text-tiilt-muted">
+                Wristband pairing isn&apos;t available in this browser — use
+                Chrome or Edge on a laptop or Android device.
+            </span>
+        )
+    }
+    if (!info) {
+        const pair = async () => {
+            setNotice("")
+            const outcome = await onAssign(speaker)
+            if (outcome === "dismissed") {
+                setNotice("No wristband picked. Switch the E4 on (hold its button until the light comes on), then try again.")
+            } else if (outcome === "failed") {
+                setNotice(
+                    "Pairing failed — check that Bluetooth is on and the wristband isn't connected to the E4 app, a phone or another laptop, then try again.",
+                )
+            }
+        }
+        return (
+            <span className="mx-auto mt-1 flex flex-col items-center gap-1">
+                <button
+                    type="button"
+                    aria-label={`Pair an E4 wristband for ${speaker.alias}`}
+                    className="cursor-pointer rounded px-1 font-ahamono text-[11px] text-tiilt-muted hover:text-tiilt-ink"
+                    onClick={pair}
+                >
+                    ⌚ pair E4
+                </button>
+                {notice && <span className="max-w-56 text-[11px] leading-snug text-amber-600">{notice}</span>}
+            </span>
+        )
+    }
+    const live = info.status === "connected"
+    const pressed = info.pressedAt != null
+    return (
+        <span className="mx-auto flex flex-col items-center gap-0.5 font-ahamono text-[11px] text-tiilt-muted">
+            <span className="flex items-center gap-1.5">
+                <span className={live ? "text-tiilt-ink" : "text-tiilt-line"}>⌚</span>
+                <span title="Skin conductance (EDA)">{info.eda != null ? info.eda.toFixed(2) + " µS" : "…"}</span>
+                <span title="Skin temperature">{info.temp != null ? info.temp.toFixed(1) + " °C" : ""}</span>
+                <span>{info.name}</span>
+                {!live && <span className="text-amber-600">reconnecting…</span>}
+                <button
+                    type="button"
+                    aria-label={`Remove E4 wristband for ${speaker.alias}`}
+                    className="cursor-pointer px-1 hover:text-tiilt-ink"
+                    onClick={() => onUnassign(speaker)}
+                >
+                    ✕
+                </button>
+            </span>
+            {pressed ? (
+                <span role="status" className="rounded bg-emerald-100 px-1.5 font-semibold text-emerald-700">
+                    button pressed — this is {speaker.alias}&apos;s band
+                </span>
+            ) : (
+                <span title="Press the band's button briefly to check which card it belongs to; each press is also saved as a marker. Holding it switches the band off.">
+                    {info.presses
+                        ? `${info.presses} button press${info.presses === 1 ? "" : "es"} marked`
+                        : "press the band's button to check it's this one"}
+                </span>
+            )}
+        </span>
+    )
+}
+
 // One-tap group sizing on the speaker page (the join form no longer asks):
 // creates N speaker slots at once; each then records or attaches a
 // fingerprint. Hidden as soon as any slot exists.
@@ -680,6 +758,26 @@ function ByodJoinPage(props) {
                                                             twice.
                                                         </p>
                                                     </div>
+                                                    <div>
+                                                        <Toggle
+                                                            label="Add Empatica E4 wristbands"
+                                                            checked={!!props.e4Enabled}
+                                                            onChange={() =>
+                                                                props.setE4Enabled(
+                                                                    !props.e4Enabled,
+                                                                )
+                                                            }
+                                                        />
+                                                        <p className="mt-1 text-xs text-tiilt-muted">
+                                                            Pair each wristband
+                                                            from its wearer&apos;s
+                                                            card, then press the
+                                                            band&apos;s button
+                                                            briefly: the card that
+                                                            lights up is the one
+                                                            it&apos;s paired to.
+                                                        </p>
+                                                    </div>
                                                 </div>
                                             </div>
                                         </div>
@@ -835,6 +933,14 @@ function ByodJoinPage(props) {
                                                                 onAssign={props.assignMuseSensor}
                                                                 onUnassign={props.unassignMuseSensor}
                                                                 onSync={props.startMuseSync}
+                                                            />
+                                                            <E4Control
+                                                                speaker={speaker}
+                                                                supported={props.bluetoothSupported}
+                                                                info={(props.e4Info || {})[speaker.id]}
+                                                                enabled={props.e4Enabled}
+                                                                onAssign={props.assignE4Sensor}
+                                                                onUnassign={props.unassignE4Sensor}
                                                             />
                                                         </div>
                                                         <div className="flex flex-none flex-col items-center gap-0.5">

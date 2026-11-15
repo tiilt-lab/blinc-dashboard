@@ -7,6 +7,10 @@ from app import db
 # wearable stream (physio_time.py), so heart-rate, EEG and imported device
 # files line up with them by time. sensors lists the wearables that laptop
 # had connected at that moment (e.g. "polar:Polar H10 A1B2C3D4 (Ana)").
+# wristband_button is a press of an Empatica E4's own button: sensors names
+# that one band and its wearer, the time is the band's own time of the press
+# (e4-wristband.js), and detail holds band_tick, the press in 1/64 s since
+# the band started streaming (its BVP sample number in the raw export).
 # marker_id is the page's own id for the press: a batch re-sent after a lost
 # reply is stored once.
 class EventMarker(db.Model):
@@ -36,6 +40,7 @@ class EventMarker(db.Model):
         'game_end',
         'discussion_start',
         'baseline_cancelled',
+        'wristband_button',
     )
 
     # The markers CSV (routes/event_markers.py, and the session data export).

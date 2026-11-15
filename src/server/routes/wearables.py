@@ -1,5 +1,6 @@
 """Wearable sensors streamed from the byod join page over Web Bluetooth:
-heart-rate straps (Polar H10), EEG headbands (Muse), the sync taps that
+heart-rate straps (Polar H10), EEG headbands (Muse), Empatica E4
+wristbands (raw signals only, e4-wristband.js), the sync taps that
 check their clocks against the pod's audio, and the server clock the join
 page syncs to (physio_time.py has the timing rules)."""
 import math
@@ -162,10 +163,10 @@ def get_pod_eeg(session_id, session_device_id, **kwargs):
 @api_routes.route('/api/v1/devices/<int:device_id>/raw/client', methods=['POST'])
 @wrappers.verify_device_read_access
 def add_device_raw_blocks(device_id, **kwargs):
-    # Native-rate signal from the join page (muse-eeg.js RawBlockAssembler):
-    # one block per stream per second, {sensor_kind, stream, index (first
-    # sample since connect), t / server_t (its first sample), data (base64
-    # int16 counts)}. A block whose size does not match its stream's layout
+    # Native-rate signal from the join page (muse-eeg.js, e4-wristband.js;
+    # RawBlockAssembler): one block per stream per second, {sensor_kind,
+    # stream, index (first sample since connect), t / server_t (its first
+    # sample), data (base64 counts, int16 or the stream's width)}. A block whose size does not match its stream's layout
     # (raw_signals.SPECS) is dropped, not stored half-read.
     session_device = kwargs.get('session_device') or database.get_session_devices(id=device_id)
     content = request.get_json() or {}
@@ -196,7 +197,7 @@ def add_device_raw_blocks(device_id, **kwargs):
             'sample_index': index,
             'time_ms': physio_time.session_times(at, start_ms)[1],
             'n_samples': sp['rate'],
-            'n_missing': raw_signals.missing_count(data),
+            'n_missing': raw_signals.missing_count(data, sp),
             'data': data,
         })
     added = database.add_raw_blocks_batch(session_device.id, rows) if rows else []
@@ -234,8 +235,9 @@ def export_pod_raw(session_id, session_device_id, sensor_kind, stream, **kwargs)
         buf = io.StringIO()
         writer = csv.writer(buf)
         writer.writerow(raw_signals.header(sp))
+        state = {}  # running sums across blocks (E4 BVP)
         for block in query.yield_per(RAW_EXPORT_PAGE):
-            writer.writerows(raw_signals.csv_rows(sp, block))
+            writer.writerows(raw_signals.csv_rows(sp, block, state))
             yield buf.getvalue()
             buf.seek(0)
             buf.truncate(0)
