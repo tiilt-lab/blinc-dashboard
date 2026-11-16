@@ -115,7 +115,14 @@ jobs:
       - name: gitleaks
         run: |
           VERSION=8.18.4
-          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz" | tar -xz gitleaks
+          SHA256=ba6dbb656933921c775ee5a2d1c13a91046e7952e9d919f9bac4cec61d628e7d
+          # -f + retries: a transient GitHub error page used to reach tar as
+          # "not in gzip format" and fail the job (run 42567469535). The
+          # checksum is from the release's gitleaks_8.18.4_checksums.txt.
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz"
+          echo "${SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
           # Scope to the built ref's history only. fetch-depth:0 pulls ALL
           # branches, and gitleaks would otherwise scan stale ones (e.g. the
           # un-rewritten aziza_topics still holding the rotated GCP key) and
