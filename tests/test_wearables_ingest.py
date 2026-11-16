@@ -260,3 +260,30 @@ def test_e4_wristband_blocks_export_in_their_units(env, pod):
     assert temp[0].endswith(",temp_C") and temp[1].endswith(",30.08")
     acc = export("acc")
     assert acc[0].endswith(",x_g,y_g,z_g") and acc[1].endswith(",1.0,-0.5,0.0") and len(acc) == 1 + 32
+
+
+def test_the_live_pod_page_reads_only_rows_after_the_last_it_has(env, pod):
+    def hr(n):
+        return {"samples": [{"speaker_id": 3, "alias": "Ana", "hr": 60 + n, "server_t": START_MS + n * 1000.0}]}
+
+    def eeg(n):
+        return {"samples": [{"speaker_id": 4, "alias": "Bo", "channel": "AF7",
+                             "server_t": START_MS + n * 1000.0, "bands": {"alpha": n}}]}
+
+    def get(view, query=""):
+        with env.flask_app.test_request_context("/x" + query):
+            return view(session_id=pod.session_id, session_device_id=pod.id).get_json()
+
+    for n in (1, 2):
+        _post(env, env.routes.add_device_heart_rate, hr(n), device_id=pod.id)
+        _post(env, env.routes.add_device_eeg, eeg(n), device_id=pod.id)
+    first_hr = get(env.routes.get_pod_heart_rate)
+    first_eeg = get(env.routes.get_pod_eeg)
+    assert [r["heart_rate"] for r in first_hr] == [61, 62]
+    # A late backlog stamped earlier than what was read still counts as new.
+    _post(env, env.routes.add_device_heart_rate, hr(0), device_id=pod.id)
+    _post(env, env.routes.add_device_eeg, eeg(3), device_id=pod.id)
+    after_hr = get(env.routes.get_pod_heart_rate, "?after_id=%d" % max(r["id"] for r in first_hr))
+    after_eeg = get(env.routes.get_pod_eeg, "?after_id=%d" % max(r["id"] for r in first_eeg))
+    assert [r["heart_rate"] for r in after_hr] == [60]
+    assert [r["alpha"] for r in after_eeg] == [3]

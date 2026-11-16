@@ -108,6 +108,17 @@ function PodComponent() {
     return () => sub.unsubscribe();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionDeviceId]);
+  // Take the session again when it ends (session_update), so the live
+  // wearable sections (live-rows.js) stop polling. Only then: any other
+  // update keeps the same object and re-renders nothing.
+  useEffect(() => {
+    const ended = (s) => (s && s.end_date ? s.end_date.getTime() : null);
+    const sub = activeSessionService.sessionSource.subscribe((s) => {
+      if (s) setSession((prev) => (prev && prev.id === s.id && ended(prev) === ended(s) ? prev : s));
+    });
+    return () => sub.unsubscribe();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   // False until the store has received the session's transcript history;
   // the page shows a spinner rather than "no transcript" meanwhile.
   const [transcriptsReady, setTranscriptsReady] = useState(() => activeSessionService.transcriptsReady.getValue());

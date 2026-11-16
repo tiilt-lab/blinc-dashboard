@@ -330,8 +330,12 @@ def add_speaker_video_metrics_batch(session_device_id, rows):
 # Heart-rate Metrics (Polar straps streamed from the join page)
 # -------------------------
 
-def get_speaker_hr_metrics(id=None, session_id=None, session_device_id=None, speaker_alias=None):
+def get_speaker_hr_metrics(id=None, session_id=None, session_device_id=None, speaker_alias=None, after_id=None):
+    # after_id: only rows stored after that one (ids grow with every insert,
+    # so a late-flushed backlog still counts as new), for the live pod page.
     query = db.session.query(SpeakerHrMetrics).order_by(SpeakerHrMetrics.time_stamp.asc())
+    if after_id is not None:
+        query = query.filter(SpeakerHrMetrics.id > after_id)
     if session_id is not None:
         query = query.join(SessionDevice).filter(SessionDevice.session_id == session_id)
     if id is not None:
@@ -360,8 +364,12 @@ def add_speaker_hr_metrics_batch(session_device_id, samples):
 # EEG Metrics (Muse headbands streamed from the join page)
 # -------------------------
 
-def get_speaker_eeg_metrics(session_device_id):
-    return db.session.query(SpeakerEegMetrics)         .filter(SpeakerEegMetrics.session_device_id == session_device_id)         .order_by(SpeakerEegMetrics.time_ms.asc(), SpeakerEegMetrics.id.asc()).all()
+def get_speaker_eeg_metrics(session_device_id, after_id=None):
+    # after_id as in get_speaker_hr_metrics.
+    query = db.session.query(SpeakerEegMetrics).filter(SpeakerEegMetrics.session_device_id == session_device_id)
+    if after_id is not None:
+        query = query.filter(SpeakerEegMetrics.id > after_id)
+    return query.order_by(SpeakerEegMetrics.time_ms.asc(), SpeakerEegMetrics.id.asc()).all()
 
 def add_speaker_eeg_metrics_batch(session_device_id, samples):
     # samples: dicts with speaker_id, speaker_alias, sensor_name, time_stamp,

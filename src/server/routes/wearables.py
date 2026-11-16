@@ -114,7 +114,10 @@ def add_device_heart_rate(device_id, **kwargs):
 @wrappers.verify_device_read_access
 def get_pod_heart_rate(session_id, session_device_id, **kwargs):
     # Same open-read trust level as the joint_attention endpoint.
-    rows = database.get_speaker_hr_metrics(session_device_id=session_device_id)
+    # ?after_id=N returns only rows stored since row N: the live pod page
+    # polls with the highest id it has.
+    rows = database.get_speaker_hr_metrics(session_device_id=session_device_id,
+                                           after_id=request.args.get('after_id', type=int))
     return json_response([row.json() for row in rows])
 
 
@@ -156,7 +159,8 @@ def add_device_eeg(device_id, **kwargs):
 @api_routes.route('/api/v1/sessions/<int:session_id>/device/<int:session_device_id>/eeg', methods=['GET'])
 @wrappers.verify_device_read_access
 def get_pod_eeg(session_id, session_device_id, **kwargs):
-    rows = database.get_speaker_eeg_metrics(session_device_id)
+    # ?after_id=N as for heart rate.
+    rows = database.get_speaker_eeg_metrics(session_device_id, after_id=request.args.get('after_id', type=int))
     return json_response([row.json() for row in rows])
 
 

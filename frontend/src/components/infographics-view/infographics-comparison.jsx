@@ -19,6 +19,7 @@ import { EegPanel } from "../eeg/eeg-panel"
 import { E4Panel } from "../e4/e4-panel"
 import React, { useState, useEffect, useRef, lazy, Suspense } from "react"
 import { ApiService } from "../../services/api-service"
+import { useLiveRows } from "../../services/live-rows"
 
 // Heaviest chunk in the app (~288 KB). Only rendered when a pod has video
 // metrics AND the video box is expanded, so defer it until then — text-only
@@ -283,55 +284,59 @@ function AppInfographicsComparison(props) {
         "Tools",
     ]
 
-    // Heart-rate/HRV rows (Polar straps assigned on the join page). Fetched
-    // here rather than in the panel so the whole section — and its modality
-    // header in by-sensor mode — only exists for pods that actually have
-    // strap data.
-    const [hrRows, setHrRows] = useState([])
-    useEffect(() => {
-        if (!isGroup) return
+    // Wearable rows (Polar heart rate, Muse EEG band power) and the raw
+    // native-rate streams the pod has. Fetched here rather than in the panels
+    // so each section — and its modality header in by-sensor mode — only
+    // exists for pods that have that data. While the session is recording
+    // they update live (live-rows.js): new heart-rate and EEG rows every
+    // 5 s, the raw-stream list every 30 s, so a section appears once its
+    // first data arrives. Only on the pod page: a join page loads them once,
+    // its device cards already show each wearer live.
+    const recording = !props.fromclient && !!props.session && !props.session.end_date
+    const podBase =
+        isGroup && props.session && props.sessionDevice
+            ? `api/v1/sessions/${props.session.id}/device/${props.sessionDevice.id}`
+            : null
+    const getRows = (path) =>
         new ApiService()
-            .httpRequestCall(
-                `api/v1/sessions/${props.session.id}/device/${props.sessionDevice.id}/heartrate`,
-                "GET",
-                {},
-            )
+            .httpRequestCall(path, "GET", {})
             .then((r) => (r.status === 200 ? r.json() : []))
-            .then((d) => setHrRows(Array.isArray(d) ? d : []))
-            .catch(() => setHrRows([]))
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [isGroup, props.session && props.session.id, props.sessionDevice && props.sessionDevice.id])
-
-    // EEG rows (Muse headbands) and the pod's sync taps, which say how far
-    // each headband's timing sat from the audio. Same reasoning as hrRows:
-    // the section exists only for pods with headband data.
-    const [eegRows, setEegRows] = useState([])
+            .then((d) => (Array.isArray(d) ? d : []))
+            .catch(() => [])
+    const hrRows = useLiveRows(getRows, `${podBase}/heartrate`, !!podBase, recording)
+    const eegRows = useLiveRows(getRows, `${podBase}/eeg`, !!podBase, recording)
+    // The pod's sync taps, which say how far each headband's timing sat from
+    // the audio. The report reads the audio, so it is fetched once there is
+    // EEG to align, and again when the session ends, not polled.
     const [syncs, setSyncs] = useState([])
+    const hasEeg = eegRows.length > 0
+    useEffect(() => {
+        setSyncs([])
+        if (podBase && hasEeg) getRows(`${podBase}/sync`).then(setSyncs)
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [podBase, hasEeg, recording])
     // The raw native-rate streams the pod has (raw_signals.py), offered as
     // CSV downloads; signed-in readers only, so a join page gets none.
     const [rawStreams, setRawStreams] = useState([])
     useEffect(() => {
-        if (!isGroup) return
-        const base = `api/v1/sessions/${props.session.id}/device/${props.sessionDevice.id}`
+        setRawStreams([])
+        if (!podBase) return undefined
         const api = new ApiService()
-        const get = (path) =>
-            api
-                .httpRequestCall(`${base}/${path}`, "GET", {})
-                .then((r) => (r.status === 200 ? r.json() : []))
-                .then((d) => (Array.isArray(d) ? d : []))
-                .catch(() => [])
-        get("eeg").then((rows) => {
-            setEegRows(rows)
-            // The sync report reads the audio; only worth it with EEG to align.
-            if (rows.length) get("sync").then(setSyncs)
-        })
-        get("raw").then((streams) =>
-            setRawStreams(
-                streams.map((s) => ({ ...s, href: `${api.getEndpoint()}${base}/raw/${s.sensor_kind}/${s.stream}.csv` })),
-            ),
-        )
+        const load = () =>
+            getRows(`${podBase}/raw`).then((streams) =>
+                setRawStreams(
+                    streams.map((s) => ({
+                        ...s,
+                        href: `${api.getEndpoint()}${podBase}/raw/${s.sensor_kind}/${s.stream}.csv`,
+                    })),
+                ),
+            )
+        load()
+        if (!recording) return undefined
+        const timer = setInterval(() => !document.hidden && load(), 30000)
+        return () => clearInterval(timer)
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [isGroup, props.session && props.session.id, props.sessionDevice && props.sessionDevice.id])
+    }, [podBase, recording])
     // Array order == the "by question" order.
     const groupSections = !isGroup
         ? []
