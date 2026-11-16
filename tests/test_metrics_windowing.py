@@ -32,7 +32,7 @@ def test_fmt_start_time_is_hms_everywhere():
 
 def test_all_three_exports_use_the_shared_start_time_formatter():
     with open(os.path.join(os.path.dirname(__file__), "..", "src", "server",
-                           "routes", "session.py")) as f:
+                           "exports.py")) as f:
         s = f.read()
     assert s.count("fmt_start_time(") >= 3, \
         "all three CSV exports must format Start Time via the shared helper"

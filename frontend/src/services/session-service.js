@@ -500,44 +500,24 @@ class SessionService {
     );
   }
 
-  downloadSessionTranscriptMetrics(sessionId, fileName,windowsize,format) {
-    if(windowsize === ""){
-      windowsize = 0;
-    }else{
-      windowsize = parseInt(windowsize);
-    }
-
-    return this.api.httpRequestCall(
-      `api/v1/sessions/${sessionId}/exporttranscriptmetrics/${windowsize}/${format}`,
-      "GET",
-      {}
-    );
+  // The Download dialog: chosen datasets as one ZIP of CSVs (keys from
+  // components/session-export/session-export.js), and each pod's video.
+  exportSessionData(sessionId, items, windowSize) {
+    return this.api.httpRequestCall(`api/v1/sessions/${sessionId}/export.zip`, "GET", {
+      items: items.join(","),
+      window: windowSize || 0,
+    });
   }
 
-  downloadSessionVideoMetrics(sessionId, fileName,windowsize,format) {
-    if(windowsize === ""){
-      windowsize = 0;
-    }else{
-      windowsize = parseInt(windowsize);
-    }
-    return this.api.httpRequestCall(
-      `api/v1/sessions/${sessionId}/exportvideometrics/${windowsize}/${format}`,
-      "GET",
-      {}
-    );
+  getVideoDownloadStatus(sessionId, sessionDeviceId, opts = {}) {
+    return this._get(`api/v1/sessions/${sessionId}/device/${sessionDeviceId}/video/download/status`, {}, opts);
   }
 
-  downloadSessionTranscriptVideoMetrics(sessionId, fileName,windowsize,format) {
-    if(windowsize === ""){
-      windowsize = 0;
-    }else{
-      windowsize = parseInt(windowsize);
-    }
-    return this.api.httpRequestCall(
-      `api/v1/sessions/${sessionId}/exporttranscriptvideometrics/${windowsize}/${format}`,
-      "GET",
-      {}
-    );
+  // A plain link target (the browser streams the file to disk); part=N is
+  // raw recording file N, offered when the joined video could not be built.
+  videoDownloadUrl(sessionId, sessionDeviceId, part) {
+    const base = this.api.getEndpoint() + `api/v1/sessions/${sessionId}/device/${sessionDeviceId}/video/download`;
+    return part ? `${base}?part=${part}` : base;
   }
 
   getSynthesizedFeedbackMetrics(sessionId, sessionDeviceId) {
