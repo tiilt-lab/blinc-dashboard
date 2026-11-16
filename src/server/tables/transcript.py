@@ -22,6 +22,11 @@ class Transcript(db.Model):
     # JSON blob of per-utterance voice features (prosody #6 + vocal emotion #5),
     # nullable. Requires migration; older rows read as None.
     voice_features = db.Column(db.Text, nullable=True)
+    # The utterance on the session clock in ms, as the audio service stamped
+    # it (start_time/length are those stamps rounded to whole seconds, and
+    # stay the natural key). Null on rows stored before this column existed.
+    start_ms = db.Column(db.BigInteger, nullable=True)
+    length_ms = db.Column(db.Integer, nullable=True)
 
     keywords = db.relationship("KeywordUsage", lazy='joined', uselist=True, cascade="all, delete", passive_deletes=True)
     metrics = db.relationship("SpeakerTranscriptMetrics", back_populates="transcript", cascade="all, delete",passive_deletes=True)
@@ -33,7 +38,7 @@ class Transcript(db.Model):
     def __hash__(self):
         return hash((self.id))
 
-    def __init__(self, session_device_id, start_time, length, transcript, question, direction, emotional_tone, analytic_thinking, clout, authenticity, certainty, topic_id, speaker_tag, speaker_id, voice_features=None):
+    def __init__(self, session_device_id, start_time, length, transcript, question, direction, emotional_tone, analytic_thinking, clout, authenticity, certainty, topic_id, speaker_tag, speaker_id, voice_features=None, start_ms=None, length_ms=None):
         self.session_device_id = session_device_id
         self.start_time = start_time
         self.length = length
@@ -49,6 +54,8 @@ class Transcript(db.Model):
         self.topic_id = topic_id
         self.speaker_tag = speaker_tag
         self.speaker_id = speaker_id
+        self.start_ms = start_ms
+        self.length_ms = length_ms
         import json as _json
         self.voice_features = _json.dumps(voice_features) if voice_features else None
 
@@ -69,6 +76,8 @@ class Transcript(db.Model):
             session_device_id=self.session_device_id,
             start_time=self.start_time,
             length=self.length,
+            start_ms=self.start_ms,
+            length_ms=self.length_ms,
             question=self.question,
             transcript=self.transcript,
             direction=self.direction,

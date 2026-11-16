@@ -1,5 +1,6 @@
-// Event markers from the join page: joining, starting the recording and each
-// step of the baseline (src/server/tables/event_marker.py has the labels).
+// Event markers from the join page: joining, starting the recording, each
+// step of the baseline and E4 wristband button presses
+// (src/server/tables/event_marker.py has the labels).
 // A marker is timed the moment it happens and queued; the queue posts it to
 // the server and keeps it (retrying) until the server has it, so a marker
 // pressed while the network blips, or before the pod's key exists, is not
@@ -37,8 +38,10 @@ export class MarkerQueue {
         this.timer = null
     }
 
-    mark(label, { sensors = "", detail = "" } = {}) {
-        const marker = { marker_id: newMarkerId(), label, t: this.now() }
+    // t: when it happened on the page clock, if not now (an E4 button press
+    // carries the band's own time of the press).
+    mark(label, { sensors = "", detail = "", t = null } = {}) {
+        const marker = { marker_id: newMarkerId(), label, t: t == null ? this.now() : t }
         if (sensors) marker.sensors = sensors
         if (detail) marker.detail = detail
         this.pending.push(marker)

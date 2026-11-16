@@ -1,8 +1,9 @@
 # BLINC Discussion Capture
 
 BLINC records small-group discussions and turns them into live and post-hoc
-analytics. Each group ("pod") records audio, and optionally video and Polar
-heart-rate straps, from a browser or a hardware mic-array pod. The pipeline
+analytics. Each group ("pod") records audio, and optionally video, Polar
+heart-rate straps and Muse EEG headbands, from a browser or a hardware
+mic-array pod. The pipeline
 identifies who is speaking from voice prints, transcribes the speech, and
 computes discussion metrics (participation, cohesion, keywords, questions,
 emotions, gaze and joint attention) that facilitators watch on a dashboard
@@ -34,7 +35,9 @@ negotiation scheme for the Kellogg "Viking" case).
    with a lower speech floor; an existing print is never replaced from a
    pod). Full enrollment (a coached, longer voice sample plus face capture
    for video) happens ahead of time in the sign-up flow (`/signup`). Polar
-   H10 straps are paired per speaker over Web Bluetooth on the same screen.
+   H10 straps and Muse headbands are paired per speaker over Web Bluetooth
+   on the same screen; a headband's "sync timing" button (press, then tap
+   the band twice) checks its timing against the pod's audio.
    Someone arriving late is added from the Options menu during the session.
 
 4. **Live capture and processing.** On "start" the browser streams:
@@ -49,7 +52,15 @@ negotiation scheme for the Kellogg "Viking" case).
      recognition against enrolled faces, facial emotion, gaze and attention
      (Gaze-LLE), object of focus (YOLO), joint attention. Frames are decoded
      by ffmpeg, on the GPU when one is present (`DC_VIDEO_HWDEC`).
-   - **Heart rate** from paired Polar straps, posted to the REST API.
+   - **Heart rate** from paired Polar straps and **EEG band power** from
+     paired Muse headbands, posted to the REST API (`routes/wearables.py`).
+     Samples are timed from each sensor's own counter, converted to the
+     server clock in the browser (`server-clock.js`, `sample-clock.js`) and
+     stored with millisecond session times, as are transcripts; sync taps
+     found in the audio measure what is left (`sync_taps.py`). The Muse's
+     raw 256 Hz EEG and 52 Hz accelerometer are kept too, losslessly, in
+     their own table (`raw_signals.py`, `wearable_raw_block`), and download
+     from the pod page as one CSV row per sample.
 
    The processors never write the database. They POST results to the API's
    `/api/v1/callback/*` routes, which persist to MySQL and push live updates

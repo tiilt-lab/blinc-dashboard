@@ -10,6 +10,10 @@ import "chart.js/auto"
 // directly; HRV is RMSSD over the RR stream in 60-second windows — the
 // standard short-window vagal-tone measure (higher = calmer/recovered,
 // dips = load or stress).
+//
+// Rows since the clock sync carry time_ms (the notification, ms on the
+// session clock) and beat_ms (when its last beat ended, rebuilt from the
+// strap's own RR sequence); older rows have whole-second time_stamp only.
 
 // Physiologically plausible beat-to-beat intervals only (30-200 bpm);
 // anything outside is strap noise/dropout, and one bad beat would dominate
@@ -49,16 +53,20 @@ function bySpeaker(rows, speakers) {
     return map
 }
 
+// Session seconds of a row: ms precision where the row has it.
+const rowSeconds = (r) => (r.time_ms != null ? r.time_ms / 1000 : r.time_stamp)
+
 function smoothHr(rows) {
     const out = []
     let bucket = null
     for (const r of rows) {
-        const b = Math.floor(r.time_stamp / HR_SMOOTH_S)
+        const t = rowSeconds(r)
+        const b = Math.floor(t / HR_SMOOTH_S)
         if (!bucket || bucket.b !== b) {
             if (bucket) out.push({ x: bucket.t / bucket.n, y: bucket.hr / bucket.n })
             bucket = { b, t: 0, hr: 0, n: 0 }
         }
-        bucket.t += r.time_stamp
+        bucket.t += t
         bucket.hr += r.heart_rate
         bucket.n += 1
     }
@@ -70,6 +78,20 @@ function rrSequence(rows) {
     const seq = []
     for (const r of rows) {
         if (!r.rr_ms) continue
+        if (r.beat_ms != null) {
+            // The last interval ended at beat_ms; each earlier one ended an
+            // interval before the next.
+            const parts = String(r.rr_ms).split(",").map((p) => parseInt(p, 10))
+            const beats = []
+            let end = r.beat_ms / 1000
+            for (let i = parts.length - 1; i >= 0; i--) {
+                const v = parts[i]
+                if (v >= RR_MIN && v <= RR_MAX) beats.push({ t: end, rr: v })
+                if (Number.isFinite(v)) end -= v / 1000
+            }
+            seq.push(...beats.reverse())
+            continue
+        }
         // A notification can carry several beats; space them out by their
         // own intervals instead of stacking them on one timestamp, which
         // drew vertical zigzags on the tachogram.
@@ -269,4 +291,4 @@ function HeartRatePanel({ rows, speakers }) {
     )
 }
 
-export { HeartRatePanel }
+export { HeartRatePanel, bySpeaker, ChartCard, rrSequence }

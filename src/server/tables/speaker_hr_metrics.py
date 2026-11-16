@@ -4,6 +4,11 @@ from app import db
 # from the byod join page over Web Bluetooth. rr_ms holds the notification's
 # beat-to-beat RR intervals as a comma-separated list of milliseconds — the
 # raw material for HRV (RMSSD/SDNN); a notification can carry 0-3 of them.
+# time_ms is the notification on the session clock in ms (time_stamp is the
+# same instant in whole seconds); beat_ms is when the notification's LAST
+# beat ended, rebuilt from the strap's RR sequence (sample-clock.js), so the
+# earlier beats sit at beat_ms minus the later intervals. Both are null on
+# rows from before the clock sync (physio_time.py).
 class SpeakerHrMetrics(db.Model):
     __tablename__ = 'speaker_hr_metrics'
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
@@ -14,6 +19,8 @@ class SpeakerHrMetrics(db.Model):
     time_stamp = db.Column(db.Integer, nullable=False)
     heart_rate = db.Column(db.Integer, nullable=False)
     rr_ms = db.Column(db.String(64))
+    time_ms = db.Column(db.BigInteger, nullable=True)
+    beat_ms = db.Column(db.BigInteger, nullable=True)
 
     # Declared by migration c4d5e6f7a8b9 but never in the model, so
     # autogenerate kept proposing to drop it.
@@ -22,7 +29,7 @@ class SpeakerHrMetrics(db.Model):
     def __hash__(self):
         return hash((self.id))
 
-    def __init__(self, session_device_id, speaker_id, speaker_alias, sensor_name, time_stamp, heart_rate, rr_ms):
+    def __init__(self, session_device_id, speaker_id, speaker_alias, sensor_name, time_stamp, heart_rate, rr_ms, time_ms=None, beat_ms=None):
         self.session_device_id = session_device_id
         self.speaker_id = speaker_id
         self.speaker_alias = speaker_alias
@@ -30,6 +37,8 @@ class SpeakerHrMetrics(db.Model):
         self.time_stamp = time_stamp
         self.heart_rate = heart_rate
         self.rr_ms = rr_ms
+        self.time_ms = time_ms
+        self.beat_ms = beat_ms
 
     def json(self):
         return dict(
@@ -40,4 +49,6 @@ class SpeakerHrMetrics(db.Model):
             sensor_name=self.sensor_name,
             time_stamp=self.time_stamp,
             heart_rate=self.heart_rate,
-            rr_ms=self.rr_ms)
+            rr_ms=self.rr_ms,
+            time_ms=self.time_ms,
+            beat_ms=self.beat_ms)

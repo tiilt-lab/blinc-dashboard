@@ -27,7 +27,8 @@ def test_rating_rater_survey_fk_session_with_cascade():
 
 
 def test_metrics_fk_device_with_cascade():
-    for fn in ("speaker_video_metrics.py", "speaker_hr_metrics.py"):
+    for fn in ("speaker_video_metrics.py", "speaker_hr_metrics.py",
+               "speaker_eeg_metrics.py", "sync_marker.py", "wearable_raw_block.py"):
         s = _read(fn)
         assert "ForeignKey('session_device.id'" in s or 'ForeignKey("session_device.id"' in s, \
             f"{fn}: session_device_id must be a FK to session_device.id"

@@ -33,6 +33,14 @@ describe("MarkerQueue", () => {
         expect(q.pending).toEqual([])
     })
 
+    it("takes the time a marker happened when it isn't now (an E4 button press)", async () => {
+        const sent = []
+        const q = new MarkerQueue({ send: async (b) => sent.push(b) && true, now: () => 9000 })
+        q.mark("wristband_button", { sensors: "e4:Empatica E4 Ab12 (Ana)", detail: "band_tick=1202", t: 8650 })
+        await settle()
+        expect(sent[0][0]).toMatchObject({ label: "wristband_button", t: 8650, detail: "band_tick=1202" })
+    })
+
     it("keeps markers through failures and resends them with the same ids", async () => {
         const timers = manualTimers()
         const attempts = []
