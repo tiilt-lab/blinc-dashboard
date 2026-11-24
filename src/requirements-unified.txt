@@ -326,7 +326,7 @@ tokenizers==0.23.3
 tokenspeed-mla==0.1.2
 tokenspeed-triton==3.7.10.post20260531
 tomlkit==0.14.0
-torch==2.11.0+cu128
+torch==2.13.0
 torch-audiomentations==0.12.0
 torch_c_dlpack_ext==0.1.5
 torch_pitch_shift==1.2.5
